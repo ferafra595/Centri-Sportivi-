@@ -46,3 +46,25 @@
 .conflict-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .conflict-list span{background:rgba(255,255,255,.65);padding:5px 8px;border-radius:999px;font-size:11px}
 @media(max-width:700px){.schedule-head{align-items:stretch;flex-direction:column}.recurring-schedule-row{grid-template-columns:1fr 1fr auto}}
+
+
+/* V3.2 – gestione separata prenotazioni / ricorrenti / chiusure */
+.booking-management-modal{max-width:920px}
+.booking-tabs{display:flex;gap:8px;padding:5px;background:#f3f5f7;border-radius:16px;margin-bottom:18px}
+.booking-tab{border:0;background:transparent;border-radius:12px;padding:10px 14px;font-weight:850;display:flex;gap:8px;align-items:center}
+.booking-tab span{min-width:22px;height:22px;border-radius:999px;background:#e5e8ec;display:grid;place-items:center;font-size:10px}
+.booking-tab.active{background:#fff;box-shadow:0 5px 16px rgba(16,24,40,.08)}
+.manage-list{display:flex;flex-direction:column;gap:9px}
+.manage-row{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:15px;padding:12px}
+.manage-row>div:first-child{display:flex;flex-direction:column;gap:3px}.manage-row span{font-size:11px;color:var(--muted)}
+.manage-row.is-cancelled,.recurring-instance.is-cancelled{opacity:.52}
+.recurring-groups{display:flex;flex-direction:column;gap:14px}
+.recurring-group-card{border:1px solid var(--line);border-radius:18px;padding:16px;background:#fff}
+.recurring-group-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
+.recurring-group-head h3{margin:0 0 4px;font-size:19px}.recurring-group-head p,.recurring-group-head small{margin:0;color:var(--muted);font-size:11px}
+.recurring-instance-list{margin-top:14px;border-top:1px solid var(--line)}
+.recurring-instance{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:10px 2px;border-bottom:1px solid var(--line)}
+.recurring-instance>span{display:flex;flex-direction:column;gap:2px}.recurring-instance strong{font-size:12px}.recurring-instance small{font-size:10px;color:var(--muted)}
+.recurring-group-actions{display:flex;justify-content:flex-end;padding-top:12px}
+.btn.tiny{padding:6px 8px;border-radius:8px;font-size:10px}
+@media(max-width:700px){.booking-tabs{overflow:auto}.booking-tab{white-space:nowrap}.manage-row{align-items:flex-start;flex-wrap:wrap}.recurring-group-head{flex-direction:column}.recurring-group-head .btn{width:100%}}
