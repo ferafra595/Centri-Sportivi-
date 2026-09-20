@@ -404,17 +404,19 @@ async function handlePost(request, env, url) {
     if (!s) return bad('Non autorizzato', 401);
     const id = Number(data.id || 0);
     if (!data.slug || !data.name) return bad('Nome e slug sono obbligatori');
+    let galleryJson = '[]';
+    try { const g = JSON.parse(String(data.gallery_json || '[]')); galleryJson = JSON.stringify(Array.isArray(g) ? g.filter(Boolean).slice(0,24) : []); } catch {}
     const values = [
-      data.slug, data.name, data.logo_url||'', data.cover_url||'', data.favicon_url||'', data.accent_color||'#111827',
+      data.slug, data.name, data.logo_url||'', data.cover_url||'', data.favicon_url||'', galleryJson, data.accent_color||'#111827',
       data.phone||'', data.whatsapp||'', data.email||'', data.address||'', data.description||'', data.services_text||'', data.cancellation_rules||'', data.custom_domain||'',
       data.parking ? 1 : 0, data.showers ? 1 : 0, data.lighting ? 1 : 0,
       data.conventions_enabled ? 1 : 0, data.recurring_enabled ? 1 : 0, data.active === false ? 0 : 1
     ];
     if (id) {
-      await env.DB.prepare(`UPDATE centers SET slug=?,name=?,logo_url=?,cover_url=?,favicon_url=?,accent_color=?,phone=?,whatsapp=?,email=?,address=?,description=?,services_text=?,cancellation_rules=?,custom_domain=?,parking=?,showers=?,lighting=?,conventions_enabled=?,recurring_enabled=?,active=? WHERE id=?`).bind(...values,id).run();
+      await env.DB.prepare(`UPDATE centers SET slug=?,name=?,logo_url=?,cover_url=?,favicon_url=?,gallery_json=?,accent_color=?,phone=?,whatsapp=?,email=?,address=?,description=?,services_text=?,cancellation_rules=?,custom_domain=?,parking=?,showers=?,lighting=?,conventions_enabled=?,recurring_enabled=?,active=? WHERE id=?`).bind(...values,id).run();
       return ok({ id });
     }
-    const r = await env.DB.prepare(`INSERT INTO centers(slug,name,logo_url,cover_url,favicon_url,accent_color,phone,whatsapp,email,address,description,services_text,cancellation_rules,custom_domain,parking,showers,lighting,conventions_enabled,recurring_enabled,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...values).run();
+    const r = await env.DB.prepare(`INSERT INTO centers(slug,name,logo_url,cover_url,favicon_url,gallery_json,accent_color,phone,whatsapp,email,address,description,services_text,cancellation_rules,custom_domain,parking,showers,lighting,conventions_enabled,recurring_enabled,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...values).run();
     return ok({ id: r.meta.last_row_id });
   }
 
@@ -424,16 +426,16 @@ async function handlePost(request, env, url) {
     const centerId = Number(data.center_id), id = Number(data.id || 0);
     if (!centerId || !data.name || !data.sport) return bad('Dati campo incompleti');
     const vals = [
-      centerId, data.name, data.sport, data.surface||'', data.indoor?1:0, Number(data.duration_minutes||60),
+      centerId, data.name, data.sport, data.surface||'', data.image_url||'', data.indoor?1:0, Number(data.duration_minutes||60),
       Math.round(Number(data.price_no_shower||0)*100), Math.round(Number(data.price_shower||0)*100),
       Math.round(Number(data.weekend_price_no_shower||0)*100), Math.round(Number(data.weekend_price_shower||0)*100),
       String(data.pricing_note||''), data.opening_time||'08:00', data.closing_time||'23:00', data.active===false?0:1
     ];
     if (id) {
-      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,indoor=?,duration_minutes=?,price_cents=?,shower_price_cents=?,weekend_price_cents=?,weekend_shower_price_cents=?,pricing_note=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
+      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,image_url=?,indoor=?,duration_minutes=?,price_cents=?,shower_price_cents=?,weekend_price_cents=?,weekend_shower_price_cents=?,pricing_note=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
       return ok({ id });
     }
-    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,indoor,duration_minutes,price_cents,shower_price_cents,weekend_price_cents,weekend_shower_price_cents,pricing_note,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
+    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,image_url,indoor,duration_minutes,price_cents,shower_price_cents,weekend_price_cents,weekend_shower_price_cents,pricing_note,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
     return ok({ id:r.meta.last_row_id });
   }
 
