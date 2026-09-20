@@ -52,7 +52,7 @@ function renderHome(){
           <div class="portal-mark">S</div>
           <div><strong>Sport Booking</strong><span>Prenota il tuo campo</span></div>
         </a>
-        <button class="btn ghost" id="accessBtn">Area riservata</button>
+        <a class="btn ghost" href="/?view=login">Area riservata</a>
       </header>
 
       <section class="portal-hero">
@@ -73,13 +73,6 @@ function renderHome(){
         <div id="centerGrid" class="center-grid">${centerCards(state.centers)}</div>
       </section>
 
-      <section class="access-section" id="accessSection">
-        <div class="access-copy"><span class="eyebrow">AREA RISERVATA</span><h2>Gestisci la piattaforma</h2><p>L’accesso operativo è separato dall’esperienza di prenotazione degli utenti.</p></div>
-        <div class="access-grid">
-          <a class="access-card" href="/?view=login&type=manager"><div class="access-icon">G</div><div><strong>Pannello gestore</strong><span>Calendario, prenotazioni, blocchi e convenzioni.</span></div><b>→</b></a>
-          <a class="access-card dark" href="/?view=login&type=admin"><div class="access-icon">A</div><div><strong>ADMIN piattaforma</strong><span>Centri, campi, accessi e configurazioni.</span></div><b>→</b></a>
-        </div>
-      </section>
 
       <footer class="portal-footer"><span>Sport Booking</span><span>Prenotazioni semplici. Gestione centralizzata.</span></footer>
     </main>`;
@@ -89,7 +82,6 @@ function renderHome(){
     const filtered=state.centers.filter(c=>[c.name,c.address,c.sports,c.description].join(' ').toLowerCase().includes(q));
     $('#centerGrid').innerHTML=centerCards(filtered);
   };
-  $('#accessBtn').onclick=()=>$('#accessSection').scrollIntoView({behavior:'smooth'});
 }
 function centerCards(list){
   if(!list.length) return `<div class="empty premium-empty">Nessun centro trovato.</div>`;
@@ -225,13 +217,11 @@ async function confirmBooking(){
 }
 
 function renderLogin(){
-  const type=qs.get('type')||'manager';
-  const isAdmin=type==='admin';
   setAccent('#101828');
   app.innerHTML=`<div class="login-page">
     <a class="login-back" href="/">← Torna ai centri</a>
     <div class="login-shell">
-      <div class="login-copy"><div class="portal-mark">S</div><span class="eyebrow">AREA RISERVATA</span><h1>${isAdmin?'ADMIN piattaforma':'Pannello gestore'}</h1><p>${isAdmin?'Gestisci centri, campi, accessi e configurazioni della piattaforma.':'Gestisci calendario, prenotazioni, blocchi e richieste del tuo centro.'}</p></div>
+      <div class="login-copy"><div class="portal-mark">S</div><span class="eyebrow">AREA RISERVATA</span><h1>Accedi alla piattaforma</h1><p>Accesso dedicato ai gestori dei centri sportivi e all’amministratore della piattaforma.</p></div>
       <form class="login-card" id="loginForm"><h2>Accedi</h2><p class="muted">Inserisci le tue credenziali.</p><div class="stack"><div class="field"><label>Email</label><input class="input" type="email" name="email" required autocomplete="username"></div><div class="field"><label>Password</label><input class="input" type="password" name="password" required autocomplete="current-password"></div><button class="btn primary full-btn">Accedi</button></div></form>
     </div>
   </div>`;
