@@ -99,7 +99,10 @@ async function handleGet(request, env, url) {
     const { results } = await env.DB.prepare(`
       SELECT c.*,
         (SELECT COUNT(*) FROM fields f WHERE f.center_id = c.id AND f.active = 1) fields_count,
-        (SELECT GROUP_CONCAT(DISTINCT f.sport) FROM fields f WHERE f.center_id = c.id AND f.active = 1) sports
+        (SELECT GROUP_CONCAT(DISTINCT f.sport) FROM fields f WHERE f.center_id = c.id AND f.active = 1) sports,
+        (SELECT GROUP_CONCAT(DISTINCT f.surface) FROM fields f WHERE f.center_id = c.id AND f.active = 1 AND f.surface!='') surfaces,
+        (SELECT COUNT(*) FROM fields f WHERE f.center_id = c.id AND f.active = 1 AND f.indoor=1) indoor_count,
+        (SELECT COUNT(*) FROM fields f WHERE f.center_id = c.id AND f.active = 1 AND f.indoor=0) outdoor_count
       FROM centers c
       WHERE c.active = 1
       ORDER BY c.name COLLATE NOCASE
@@ -162,8 +165,11 @@ async function handleGet(request, env, url) {
     const { results } = await env.DB.prepare(`
       SELECT c.*,
         (SELECT COUNT(*) FROM fields f WHERE f.center_id=c.id) fields_count,
+        (SELECT COUNT(*) FROM fields f WHERE f.center_id=c.id AND f.active=1) active_fields,
         (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') bookings_count,
-        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed' AND strftime('%Y-%m', b.date)=strftime('%Y-%m','now')) month_bookings
+        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed' AND strftime('%Y-%m', b.date)=strftime('%Y-%m','now')) month_bookings,
+        (SELECT ROUND(SUM((strftime('%s','2000-01-01 '||b.end_time)-strftime('%s','2000-01-01 '||b.start_time))/3600.0),1) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed' AND strftime('%Y-%m', b.date)=strftime('%Y-%m','now')) month_hours,
+        (SELECT MAX(b.date) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') last_booking
       FROM centers c ORDER BY c.id DESC
     `).all();
     const stats = await env.DB.prepare(`
@@ -173,7 +179,10 @@ async function handleGet(request, env, url) {
         (SELECT COUNT(*) FROM fields WHERE active=1) fields_active,
         (SELECT COUNT(*) FROM users WHERE role='manager' AND active=1) managers_active,
         (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now')) month_bookings,
-        (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND date BETWEEN date('now','-6 day') AND date('now')) week_bookings
+        (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND date BETWEEN date('now','-6 day') AND date('now')) week_bookings,
+        (SELECT ROUND(SUM((strftime('%s','2000-01-01 '||end_time)-strftime('%s','2000-01-01 '||start_time))/3600.0),1) FROM bookings WHERE status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now')) month_hours,
+        (SELECT COUNT(*) FROM bookings WHERE status='cancelled' AND strftime('%Y-%m',date)=strftime('%Y-%m','now')) month_cancelled,
+        (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND source='recurring' AND strftime('%Y-%m',date)=strftime('%Y-%m','now')) month_recurring
     `).first();
     return ok({ centers: results, stats });
   }
@@ -201,6 +210,32 @@ async function handleGet(request, env, url) {
     return ok({ managers: results });
   }
 
+  if (action === 'public-now') {
+    const date = String(url.searchParams.get('date') || '');
+    const time = String(url.searchParams.get('time') || '');
+    if (!date || !time) return bad('Data e ora obbligatorie');
+    const { results: fields } = await env.DB.prepare(`SELECT * FROM fields WHERE active=1 ORDER BY center_id,id`).all();
+    const { results: busy } = await env.DB.prepare(`SELECT field_id,start_time,end_time FROM bookings WHERE date=? AND status IN ('confirmed','blocked')`).bind(date).all();
+    const byCenter = {};
+    for (const f of fields) {
+      const step = Number(f.duration_minutes||60), startMin=Math.max(minutes(time),minutes(f.opening_time));
+      let next=null;
+      for(let m=startMin;m+step<=minutes(f.closing_time)&&m<=minutes(time)+180;m+=15){
+        const st=timeFromMinutes(m), en=timeFromMinutes(m+step);
+        if(!busy.some(b=>Number(b.field_id)===Number(f.id)&&st<b.end_time&&en>b.start_time)){ next=st; break; }
+      }
+      if(next && (!byCenter[f.center_id] || next<byCenter[f.center_id].time)) byCenter[f.center_id]={time:next,field_id:f.id,field_name:f.name};
+    }
+    return ok({ availability: byCenter });
+  }
+
+  if (action === 'public-bookings') {
+    const centerId=Number(url.searchParams.get('center_id')||0), phone=String(url.searchParams.get('phone')||'').trim();
+    if(!centerId||!phone) return bad('Centro e telefono obbligatori');
+    const {results}=await env.DB.prepare(`SELECT b.*,f.name field_name FROM bookings b JOIN fields f ON f.id=b.field_id WHERE b.center_id=? AND b.customer_phone=? ORDER BY b.date DESC,b.start_time DESC LIMIT 100`).bind(centerId,phone).all();
+    return ok({bookings:results});
+  }
+
   if (action === 'manager-dashboard') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
@@ -220,20 +255,24 @@ async function handleGet(request, env, url) {
       SELECT customer_name, customer_phone,
              COUNT(*) bookings_count,
              MAX(date) last_booking,
-             SUM(CASE WHEN date>=date('now','-30 day') THEN 1 ELSE 0 END) last30_count
+             SUM(CASE WHEN date>=date('now','-30 day') THEN 1 ELSE 0 END) last30_count,
+             COALESCE((SELECT note FROM customer_notes cn WHERE cn.center_id=? AND cn.phone=bookings.customer_phone LIMIT 1),'') customer_note
       FROM bookings
       WHERE center_id=? AND status='confirmed' AND source!='block' AND customer_phone!=''
       GROUP BY customer_phone
       ORDER BY bookings_count DESC, last_booking DESC
       LIMIT 100
-    `).bind(centerId).all();
+    `).bind(centerId, centerId).all();
     const stats = await env.DB.prepare(`
       SELECT
         SUM(CASE WHEN status='confirmed' AND date=date('now') THEN 1 ELSE 0 END) today_bookings,
         SUM(CASE WHEN status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN 1 ELSE 0 END) month_bookings,
         ROUND(SUM(CASE WHEN status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN (strftime('%s','2000-01-01 '||end_time)-strftime('%s','2000-01-01 '||start_time))/3600.0 ELSE 0 END),1) month_hours,
         SUM(CASE WHEN status='confirmed' AND payment_status='due' AND date>=date('now') THEN 1 ELSE 0 END) due_count,
-        SUM(CASE WHEN status='blocked' AND date>=date('now') THEN 1 ELSE 0 END) future_blocks
+        SUM(CASE WHEN status='blocked' AND date>=date('now') THEN 1 ELSE 0 END) future_blocks,
+        SUM(CASE WHEN status='confirmed' AND source='recurring' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN 1 ELSE 0 END) recurring_month,
+        SUM(CASE WHEN status='confirmed' AND source!='recurring' AND source!='block' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN 1 ELSE 0 END) single_month,
+        SUM(CASE WHEN status='cancelled' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN 1 ELSE 0 END) cancelled_month
       FROM bookings WHERE center_id=?
     `).bind(centerId).first();
     const topDay = await env.DB.prepare(`
@@ -246,7 +285,15 @@ async function handleGet(request, env, url) {
       WHERE center_id=? AND status='confirmed' AND date>=date('now','-90 day')
       GROUP BY hour ORDER BY n DESC LIMIT 1
     `).bind(centerId).first();
-    return ok({ center, fields, bookings, conventions, customers, stats, top_day: topDay, top_hour: topHour });
+    const topField = await env.DB.prepare(`
+      SELECT f.name, COUNT(*) n FROM bookings b JOIN fields f ON f.id=b.field_id
+      WHERE b.center_id=? AND b.status='confirmed' AND b.date>=date('now','-90 day')
+      GROUP BY b.field_id ORDER BY n DESC LIMIT 1
+    `).bind(centerId).first();
+    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth()+1, 0).getDate();
+    const capacityHours = fields.reduce((sum,f)=>sum + Math.max(0,(minutes(f.closing_time)-minutes(f.opening_time))/60)*daysInMonth,0);
+    stats.occupancy_pct = capacityHours>0 ? Math.round((Number(stats.month_hours||0)/capacityHours)*100) : 0;
+    return ok({ center, fields, bookings, conventions, customers, stats, top_day: topDay, top_hour: topHour, top_field: topField });
   }
 
   if (action === 'manager-customer-history') {
@@ -258,7 +305,8 @@ async function handleGet(request, env, url) {
       SELECT b.*, f.name field_name FROM bookings b JOIN fields f ON f.id=b.field_id
       WHERE b.center_id=? AND b.customer_phone=? ORDER BY b.date DESC, b.start_time DESC LIMIT 100
     `).bind(s.center_id, phone).all();
-    return ok({ bookings: results });
+    const note = await env.DB.prepare(`SELECT note FROM customer_notes WHERE center_id=? AND phone=?`).bind(s.center_id,phone).first();
+    return ok({ bookings: results, note: note?.note || '' });
   }
 
   return bad('Azione non valida', 404);
@@ -357,15 +405,16 @@ async function handlePost(request, env, url) {
     const id = Number(data.id || 0);
     if (!data.slug || !data.name) return bad('Nome e slug sono obbligatori');
     const values = [
-      data.slug, data.name, data.logo_url||'', data.cover_url||'', data.accent_color||'#111827',
-      data.phone||'', data.whatsapp||'', data.email||'', data.address||'', data.description||'',
+      data.slug, data.name, data.logo_url||'', data.cover_url||'', data.favicon_url||'', data.accent_color||'#111827',
+      data.phone||'', data.whatsapp||'', data.email||'', data.address||'', data.description||'', data.services_text||'', data.cancellation_rules||'', data.custom_domain||'',
+      data.parking ? 1 : 0, data.showers ? 1 : 0, data.lighting ? 1 : 0,
       data.conventions_enabled ? 1 : 0, data.recurring_enabled ? 1 : 0, data.active === false ? 0 : 1
     ];
     if (id) {
-      await env.DB.prepare(`UPDATE centers SET slug=?,name=?,logo_url=?,cover_url=?,accent_color=?,phone=?,whatsapp=?,email=?,address=?,description=?,conventions_enabled=?,recurring_enabled=?,active=? WHERE id=?`).bind(...values,id).run();
+      await env.DB.prepare(`UPDATE centers SET slug=?,name=?,logo_url=?,cover_url=?,favicon_url=?,accent_color=?,phone=?,whatsapp=?,email=?,address=?,description=?,services_text=?,cancellation_rules=?,custom_domain=?,parking=?,showers=?,lighting=?,conventions_enabled=?,recurring_enabled=?,active=? WHERE id=?`).bind(...values,id).run();
       return ok({ id });
     }
-    const r = await env.DB.prepare(`INSERT INTO centers(slug,name,logo_url,cover_url,accent_color,phone,whatsapp,email,address,description,conventions_enabled,recurring_enabled,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...values).run();
+    const r = await env.DB.prepare(`INSERT INTO centers(slug,name,logo_url,cover_url,favicon_url,accent_color,phone,whatsapp,email,address,description,services_text,cancellation_rules,custom_domain,parking,showers,lighting,conventions_enabled,recurring_enabled,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...values).run();
     return ok({ id: r.meta.last_row_id });
   }
 
@@ -436,6 +485,46 @@ async function handlePost(request, env, url) {
     return ok();
   }
 
+  if (action === 'manager-customer-note') {
+    const s=await requireRole(request,env,['manager']); if(!s)return bad('Non autorizzato',401);
+    const phone=String(data.phone||'').trim(), note=String(data.note||''); if(!phone)return bad('Telefono obbligatorio');
+    await env.DB.prepare(`INSERT INTO customer_notes(center_id,phone,note,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(center_id,phone) DO UPDATE SET note=excluded.note,updated_at=CURRENT_TIMESTAMP`).bind(s.center_id,phone,note).run();
+    return ok();
+  }
+
+  if (action === 'manager-booking-update') {
+    const s=await requireRole(request,env,['manager']); if(!s)return bad('Non autorizzato',401);
+    const id=Number(data.id), field=await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(Number(data.field_id),s.center_id).first();
+    if(!id||!field)return bad('Prenotazione o campo non valido');
+    const current=await env.DB.prepare(`SELECT * FROM bookings WHERE id=? AND center_id=?`).bind(id,s.center_id).first(); if(!current)return bad('Prenotazione non trovata',404);
+    const date=String(data.date||current.date), start=String(data.start_time||current.start_time), end=String(data.end_time||timeFromMinutes(minutes(start)+Number(field.duration_minutes||60)));
+    if(await hasConflict(env,field.id,date,start,end,id))return bad('Conflitto con una prenotazione esistente',409);
+    const pricing=effectivePricing(field,date);
+    await env.DB.prepare(`UPDATE bookings SET field_id=?,customer_name=?,customer_phone=?,date=?,start_time=?,end_time=?,price_cents=?,payment_status=?,notes=? WHERE id=? AND center_id=?`).bind(field.id,data.customer_name||current.customer_name,data.customer_phone||'',date,start,end,pricing.price_cents,data.payment_status||current.payment_status,data.notes||'',id,s.center_id).run();
+    return ok();
+  }
+
+  if (action === 'manager-block-update') {
+    const s=await requireRole(request,env,['manager']); if(!s)return bad('Non autorizzato',401);
+    const id=Number(data.id), current=await env.DB.prepare(`SELECT * FROM bookings WHERE id=? AND center_id=? AND source='block'`).bind(id,s.center_id).first(); if(!current)return bad('Chiusura non trovata',404);
+    const field=await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(Number(data.field_id||current.field_id),s.center_id).first(); if(!field)return bad('Campo non valido');
+    const date=String(data.date||current.date), start=data.full_day?field.opening_time:String(data.start_time||current.start_time), end=data.full_day?field.closing_time:String(data.end_time||current.end_time);
+    if(await hasConflict(env,field.id,date,start,end,id))return bad('Conflitto con una prenotazione esistente',409);
+    await env.DB.prepare(`UPDATE bookings SET field_id=?,date=?,start_time=?,end_time=?,notes=?,block_category=? WHERE id=? AND center_id=?`).bind(field.id,date,start,end,data.notes||'',data.block_category||'manutenzione',id,s.center_id).run();
+    return ok();
+  }
+
+  if (action === 'manager-recurring-update') {
+    const s=await requireRole(request,env,['manager']); if(!s)return bad('Non autorizzato',401);
+    const group=String(data.recurring_group||''), fromDate=String(data.from_date||''); if(!group||!fromDate)return bad('Serie e data obbligatorie');
+    const field=await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(Number(data.field_id),s.center_id).first(); if(!field)return bad('Campo non valido');
+    const schedules=new Map((Array.isArray(data.schedules)?data.schedules:[]).map(x=>[Number(x.weekday),String(x.start_time||'')]));
+    const {results:items}=await env.DB.prepare(`SELECT * FROM bookings WHERE center_id=? AND recurring_group=? AND source='recurring' AND status='confirmed' AND date>=? ORDER BY date,start_time`).bind(s.center_id,group,fromDate).all();
+    const updated=[],conflicts=[];
+    for(const b of items){const dow=getDayOfWeek(b.date),start=schedules.get(dow)||b.start_time,end=timeFromMinutes(minutes(start)+Number(field.duration_minutes||60));if(await hasConflict(env,field.id,b.date,start,end,b.id)){conflicts.push({id:b.id,date:b.date,start_time:start,end_time:end});continue;}const pricing=effectivePricing(field,b.date);await env.DB.prepare(`UPDATE bookings SET field_id=?,start_time=?,end_time=?,price_cents=? WHERE id=?`).bind(field.id,start,end,pricing.price_cents,b.id).run();updated.push(b.id)}
+    return ok({updated,conflicts});
+  }
+
   if (action === 'manager-booking') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
@@ -462,7 +551,7 @@ async function handlePost(request, env, url) {
       : await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? AND active=1`).bind(s.center_id).all();
     if (!fields.length) return bad('Nessun campo disponibile');
     if (!data.full_day && (!data.start_time || !data.end_time)) return bad('Indica orario di inizio e fine');
-    const created = [], conflicts = [];
+    const created = [], conflicts = [], blockGroup = randomToken(8);
     let guard = 0;
     for (let date = dateFrom; date <= dateTo; date = addDays(date, 1)) {
       if (++guard > 366) return bad('Il periodo massimo per una chiusura è di 366 giorni');
@@ -474,8 +563,8 @@ async function handlePost(request, env, url) {
           conflicts.push({ date, field_id: field.id, field_name: field.name, start_time: start, end_time: end });
           continue;
         }
-        await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,'blocked','block',?)`)
-          .bind(s.center_id,field.id,'Chiusura / manutenzione','',date,start,end,0,'due',data.notes||'').run();
+        await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes,block_category,block_group) VALUES(?,?,?,?,?,?,?,?,?,'blocked','block',?,?,?)`)
+          .bind(s.center_id,field.id,'Chiusura / manutenzione','',date,start,end,0,'due',data.notes||'',data.block_category||'manutenzione',blockGroup).run();
         created.push({ date, field_id: field.id, field_name: field.name, start_time: start, end_time: end });
       }
     }
