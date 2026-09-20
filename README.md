@@ -1,122 +1,73 @@
-# Sport Booking Platform — MVP Cloudflare Pages + D1
+# Sport Booking Platform
 
-Piattaforma multi-centro con:
-- App cliente personalizzata per ogni centro
-- Dashboard ADMIN centrale
-- Pannello gestore
-- Campi multipli
-- Disponibilità e prenotazioni
-- Prenotazioni telefoniche/manuali
-- Blocchi campo
-- Stato pagamento (pagamento fuori piattaforma)
-- Convenzioni sportive
-- Prenotazioni ricorrenti con controllo conflitti
+Piattaforma multi-centro per prenotazioni di campi sportivi, pensata per Cloudflare Pages + D1 e GitHub.
 
-## Struttura volutamente semplice
+## Struttura semplice
 
-```
-/
-├─ index.html
-├─ schema.sql
-├─ wrangler.toml
-├─ README.md
-├─ assets/
-│  ├─ app.css
-│  └─ app.js
-└─ functions/
-   └─ api.js
+```text
+sport-booking-platform/
+├── index.html
+├── schema.sql
+├── wrangler.toml
+├── README.md
+├── assets/
+│   ├── app.css
+│   └── app.js
+└── functions/
+    └── api.js
 ```
 
-## 1. GitHub
+## Nuova logica
 
-Crea un repository e carica questi file mantenendo esattamente la struttura.
+- `/` = portale pubblico con tutti i centri aderenti.
+- `/?center=campizzi` = app personalizzata del singolo centro.
+- `/?view=login&type=manager` = accesso gestore.
+- `/?view=login&type=admin` = accesso ADMIN.
+- `/?view=manager` = pannello gestore dopo il login.
+- `/?view=admin` = dashboard ADMIN dopo il login.
 
-## 2. Crea il database D1
+Il portale pubblico legge automaticamente tutti i centri attivi dal database D1. Non è necessario aggiungere manualmente le schede in HTML.
 
-Cloudflare Dashboard → Storage & Databases → D1 → Create database.
-Nome consigliato: `sport-booking-db`.
+## Come aggiungere Mesoraca, Botricello, Catanzaro ecc.
 
-Esegui `schema.sql` nella console D1, oppure con Wrangler:
+Entra in ADMIN e crea un centro. Nel campo `Località / indirizzo` inserisci ad esempio:
 
-```bash
-npx wrangler d1 execute sport-booking-db --remote --file=./schema.sql
+- `Mesoraca, CZ`
+- `Botricello, CZ`
+- `Catanzaro, CZ`
+
+La località verrà mostrata automaticamente sulla scheda premium nella Home.
+
+## Cloudflare D1
+
+Il binding deve chiamarsi:
+
+```text
+DB
 ```
 
-## 3. Collega D1 a Pages
+Nel file `wrangler.toml` deve esserci il vero `database_id` del database D1.
 
-Nel progetto Cloudflare Pages:
-Settings → Bindings → Add binding → D1 database.
+Se il database è già stato configurato con la versione precedente NON devi ricrearlo: questa versione usa le stesse tabelle.
 
-- Variable name: `DB`
-- Database: `sport-booking-db`
+## Variabili Cloudflare
 
-Dopo aver aggiunto il binding, fai un nuovo deploy.
+Imposta nel progetto Pages:
 
-Se usi `wrangler.toml`, sostituisci `INSERISCI_QUI_DATABASE_ID` con l'ID reale del D1.
-
-## 4. Variabili ADMIN
-
-Cloudflare Pages → Settings → Variables and Secrets.
-
-Aggiungi:
-- `ADMIN_EMAIL` = la tua email di accesso ADMIN
-- `ADMIN_PASSWORD` = una password forte
-
-Impostale almeno in Production. Per Preview puoi usare credenziali diverse.
-
-## 5. Collega GitHub a Cloudflare Pages
-
-Pages → Create project → Connect to Git → scegli il repository.
-
-Questo progetto non richiede build frontend.
-- Framework preset: None
-- Build command: lascia vuoto
-- Build output directory: `.`
-
-Le Pages Functions usano la cartella `/functions` alla root.
-
-## 6. URL principali
-
-App demo:
-```
-https://tuodominio.it/?center=demo-sport
+```text
+ADMIN_EMAIL
+ADMIN_PASSWORD
 ```
 
-Login gestionale:
-```
-https://tuodominio.it/?view=login
-```
+Queste credenziali vengono usate soltanto per l'ADMIN centrale. I gestori vengono creati dalla dashboard ADMIN.
 
-ADMIN:
-```
-https://tuodominio.it/?view=admin
-```
+## Deploy
 
-Gestore:
-```
-https://tuodominio.it/?view=manager
-```
+1. Sostituisci i file del repository GitHub con quelli di questa cartella.
+2. Fai commit/push.
+3. Cloudflare Pages esegue automaticamente il nuovo deploy.
+4. Apri il dominio senza parametri: vedrai la Home con i centri aderenti.
 
-L'ADMIN crea i centri, i campi e gli accessi dei gestori.
+## Database
 
-## 7. Come funziona il multi-centro
-
-Ogni centro ha uno `slug` univoco. Esempi:
-- `?center=campizzi`
-- `?center=sport-village`
-- `?center=padel-club`
-
-È sempre lo stesso codice. Logo, colore, copertina, campi, contatti e prenotazioni vengono letti dal database.
-
-## 8. Foto e logo
-
-Per l'MVP i campi `logo_url` e `cover_url` accettano URL pubblici. In una fase successiva conviene collegare Cloudflare R2 per caricare le immagini direttamente dalla ADMIN.
-
-## Nota sicurezza
-
-- Password gestori salvate con salt + SHA-256.
-- Sessioni casuali salvate in D1 e cookie HttpOnly/Secure/SameSite=Lax.
-- Query dinamiche D1 usano prepared statements/bind.
-- La password ADMIN resta una secret Cloudflare e non finisce nel repository.
-
-Per produzione, il passo successivo consigliato è aggiungere rate limiting login/prenotazioni e recupero password gestore.
+`schema.sql` serve per una nuova installazione. Se il database D1 esiste già e contiene le tabelle create dalla prima versione, non è necessario rilanciare lo schema per questo aggiornamento.
