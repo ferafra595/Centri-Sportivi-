@@ -241,9 +241,9 @@ async function loadAdmin(){
   const [centersData, managersData]=await Promise.all([api('admin-centers'),api('admin-managers')]);
   state.centers=centersData.centers; state.managers=managersData.managers;
   const active=state.centers.filter(c=>c.active).length;
-  const content=`<div class="row admin-actions"><button class="btn primary" id="newCenter">+ Nuovo centro</button><button class="btn" id="newManager">+ Accesso gestore</button><button class="btn" id="newField">+ Campo</button></div>
+  const content=`<div class="row admin-actions"><button class="btn primary" id="newCenter">+ Nuovo centro</button><button class="btn" id="newManager">+ Accesso gestore</button></div>
     <div class="stats"><div class="card stat"><span class="muted">Centri</span><strong>${state.centers.length}</strong></div><div class="card stat"><span class="muted">Attivi</span><strong>${active}</strong></div><div class="card stat"><span class="muted">Accessi gestori</span><strong>${state.managers.filter(x=>x.active).length}</strong></div><div class="card stat"><span class="muted">Prenotazioni</span><strong>${state.centers.reduce((a,c)=>a+Number(c.bookings_count||0),0)}</strong></div></div>
-    <section class="card admin-list"><div class="section-head"><div><h2>Centri sportivi</h2><p class="muted">Ogni centro ha la propria app e può avere uno o più gestori.</p></div></div><div class="stack">${state.centers.length?state.centers.map(c=>`<div class="admin-center-row"><div class="center-card"><div class="logo">${c.logo_url?`<img src="${esc(c.logo_url)}">`:'S'}</div><div><strong>${esc(c.name)}</strong><div class="muted">${esc(c.address||'Località non impostata')} · ${c.fields_count} campi</div></div></div><div class="spacer"></div><span class="status ${c.active?'confirmed':'cancelled'}">${c.active?'Attivo':'Disattivato'}</span><a class="btn small" target="_blank" href="/?center=${encodeURIComponent(c.slug)}">Apri app</a><button class="btn small" data-edit-center="${c.id}">Modifica</button></div>`).join(''):'<div class="empty">Nessun centro.</div>'}</div></section>
+    <section class="card admin-list"><div class="section-head"><div><h2>Centri sportivi</h2><p class="muted">Ogni centro ha la propria app, i propri campi e uno o più gestori.</p></div></div><div class="stack">${state.centers.length?state.centers.map(c=>`<div class="admin-center-row"><div class="center-card"><div class="logo">${c.logo_url?`<img src="${esc(c.logo_url)}">`:'S'}</div><div><strong>${esc(c.name)}</strong><div class="muted">${esc(c.address||'Località non impostata')} · ${c.fields_count} ${Number(c.fields_count)===1?'campo':'campi'}</div></div></div><div class="spacer"></div><span class="status ${c.active?'confirmed':'cancelled'}">${c.active?'Attivo':'Disattivato'}</span><button class="btn small" data-manage-fields="${c.id}">Gestisci campi</button><a class="btn small" target="_blank" href="/?center=${encodeURIComponent(c.slug)}">Apri app</a><button class="btn small" data-edit-center="${c.id}">Modifica</button></div>`).join(''):'<div class="empty">Nessun centro.</div>'}</div></section>
     <section class="card admin-list"><div class="section-head"><div><h2>Accessi gestori</h2><p class="muted">Gli account dei gestori vengono creati e controllati solo dalla tua ADMIN.</p></div><button class="btn primary small" id="newManagerInline">+ Nuovo accesso</button></div><div class="stack">${state.managers.length?state.managers.map(m=>`<div class="admin-center-row"><div><strong>${esc(m.name)}</strong><div class="muted">${esc(m.email)} · ${esc(m.center_name||'Centro non assegnato')}</div></div><div class="spacer"></div><span class="status ${m.active?'confirmed':'cancelled'}">${m.active?'Attivo':'Disattivato'}</span><button class="btn small" data-reset-manager="${m.id}">Password</button><button class="btn small" data-edit-manager="${m.id}">Modifica</button></div>`).join(''):'<div class="empty">Non hai ancora creato accessi per i gestori.</div>'}</div></section>`;
   app.innerHTML=layout('admin','Centri sportivi',content); bindLogout(); bindAdmin();
 }
@@ -251,8 +251,8 @@ function bindAdmin(){
   $('#newCenter').onclick=()=>centerForm();
   $('#newManager').onclick=()=>managerForm();
   $('#newManagerInline')?.addEventListener('click',()=>managerForm());
-  $('#newField').onclick=()=>fieldForm();
   $$('[data-edit-center]').forEach(b=>b.onclick=()=>centerForm(state.centers.find(c=>c.id==b.dataset.editCenter)));
+  $$('[data-manage-fields]').forEach(b=>b.onclick=()=>manageCenterFields(state.centers.find(c=>c.id==b.dataset.manageFields)));
   $$('[data-edit-manager]').forEach(b=>b.onclick=()=>managerForm(state.managers.find(m=>m.id==b.dataset.editManager)));
   $$('[data-reset-manager]').forEach(b=>b.onclick=()=>resetManagerPassword(state.managers.find(m=>m.id==b.dataset.resetManager)));
 }
@@ -273,10 +273,36 @@ function centerForm(c={}){
   $('[data-close]',m).onclick=()=>m.remove();
   $('#centerForm',m).onsubmit=async e=>{e.preventDefault();const fd=Object.fromEntries(new FormData(e.currentTarget));fd.id=Number(fd.id||0);fd.conventions_enabled=e.currentTarget.conventions_enabled.checked;fd.recurring_enabled=e.currentTarget.recurring_enabled.checked;fd.active=e.currentTarget.active.checked;try{await api('admin-center-save',{method:'POST',body:JSON.stringify(fd)});m.remove();toast('Centro salvato');loadAdmin()}catch(err){toast(err.message,'error')}};
 }
-function fieldForm(){
-  const m=modal(`<div class="section-head"><h2>Nuovo campo</h2><button class="btn small" data-close>Chiudi</button></div><form id="fieldForm" class="form-grid"><div class="field full"><label>Centro</label><select class="input" name="center_id">${state.centers.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Nome campo</label><input class="input" name="name" required></div><div class="field"><label>Disciplina</label><input class="input" name="sport" placeholder="Padel, calcio a 7..." required></div><div class="field"><label>Superficie</label><input class="input" name="surface"></div><div class="field"><label>Prezzo €</label><input class="input" type="number" step=".01" name="price" required></div><div class="field"><label>Durata (min)</label><input class="input" type="number" name="duration_minutes" value="60"></div><div class="field"><label>Apertura</label><input class="input" type="time" name="opening_time" value="08:00"></div><div class="field"><label>Chiusura</label><input class="input" type="time" name="closing_time" value="23:00"></div><label class="check"><input type="checkbox" name="indoor"> Coperto</label><div class="field full"><button class="btn primary full-btn">Aggiungi campo</button></div></form>`);
+async function manageCenterFields(center){
+  try{
+    const data=await api(`admin-fields&center_id=${center.id}`);
+    const fields=data.fields||[];
+    const m=modal(`<div class="section-head"><div><h2>Campi · ${esc(center.name)}</h2><div class="muted">Crea e gestisci i campi disponibili per questo centro.</div></div><button class="btn small" data-close>Chiudi</button></div>
+      <div class="row" style="margin-bottom:18px"><button class="btn primary" id="addFieldToCenter">+ Nuovo campo</button></div>
+      <div class="stack">${fields.length?fields.map(f=>`<div class="admin-center-row"><div><strong>${esc(f.name)}</strong><div class="muted">${esc(f.sport)} · ${esc(f.surface||'Superficie non specificata')} · ${money(f.price_cents)} · ${f.duration_minutes} min · ${f.opening_time}–${f.closing_time}</div></div><div class="spacer"></div><span class="status ${f.active?'confirmed':'cancelled'}">${f.active?'Attivo':'Disattivato'}</span><button class="btn small" data-edit-field="${f.id}">Modifica</button></div>`).join(''):'<div class="empty">Questo centro non ha ancora campi. Creane uno per iniziare a ricevere prenotazioni.</div>'}</div>`);
+    $('[data-close]',m).onclick=()=>m.remove();
+    $('#addFieldToCenter',m).onclick=()=>fieldForm(center,{},m);
+    $$('[data-edit-field]',m).forEach(b=>b.onclick=()=>fieldForm(center,fields.find(f=>f.id==b.dataset.editField),m));
+  }catch(err){toast(err.message,'error')}
+}
+function fieldForm(center, field={}, parentModal=null){
+  if(!center){toast('Centro non valido','error');return}
+  const editing=!!field.id;
+  const m=modal(`<div class="section-head"><div><h2>${editing?'Modifica campo':'Nuovo campo'}</h2><div class="muted">${esc(center.name)}</div></div><button class="btn small" data-close>Chiudi</button></div><form id="fieldForm" class="form-grid"><input type="hidden" name="id" value="${field.id||''}"><input type="hidden" name="center_id" value="${center.id}"><div class="field"><label>Nome campo</label><input class="input" name="name" value="${esc(field.name||'')}" placeholder="Es. Campo 1" required></div><div class="field"><label>Disciplina</label><input class="input" name="sport" value="${esc(field.sport||'')}" placeholder="Padel, calcio a 7, tennis..." required></div><div class="field"><label>Superficie</label><input class="input" name="surface" value="${esc(field.surface||'')}" placeholder="Es. Sintetico"></div><div class="field"><label>Prezzo €</label><input class="input" type="number" step=".01" min="0" name="price" value="${field.price_cents!=null?(Number(field.price_cents)/100).toFixed(2):''}" required></div><div class="field"><label>Durata prenotazione (min)</label><input class="input" type="number" min="15" step="15" name="duration_minutes" value="${field.duration_minutes||60}"></div><div class="field"><label>Apertura</label><input class="input" type="time" name="opening_time" value="${field.opening_time||'08:00'}"></div><div class="field"><label>Chiusura</label><input class="input" type="time" name="closing_time" value="${field.closing_time||'23:00'}"></div><label class="check"><input type="checkbox" name="indoor" ${field.indoor?'checked':''}> Campo coperto</label>${editing?`<label class="check"><input type="checkbox" name="active" ${field.active?'checked':''}> Campo attivo e prenotabile</label>`:''}<div class="field full"><button class="btn primary full-btn">${editing?'Salva modifiche':'Crea campo'}</button></div></form>`);
   $('[data-close]',m).onclick=()=>m.remove();
-  $('#fieldForm',m).onsubmit=async e=>{e.preventDefault();const fd=Object.fromEntries(new FormData(e.currentTarget));fd.indoor=e.currentTarget.indoor.checked;try{await api('admin-field-save',{method:'POST',body:JSON.stringify(fd)});m.remove();toast('Campo creato');loadAdmin()}catch(err){toast(err.message,'error')}};
+  $('#fieldForm',m).onsubmit=async e=>{
+    e.preventDefault();
+    const fd=Object.fromEntries(new FormData(e.currentTarget));
+    fd.id=Number(fd.id||0); fd.center_id=Number(fd.center_id); fd.indoor=e.currentTarget.indoor.checked;
+    if(editing) fd.active=e.currentTarget.active.checked;
+    try{
+      await api('admin-field-save',{method:'POST',body:JSON.stringify(fd)});
+      m.remove(); parentModal?.remove(); toast(editing?'Campo aggiornato':'Campo creato');
+      await loadAdmin();
+      const refreshed=state.centers.find(c=>Number(c.id)===Number(center.id));
+      if(refreshed) manageCenterFields(refreshed);
+    }catch(err){toast(err.message,'error')}
+  };
 }
 
 async function loadManager(){
