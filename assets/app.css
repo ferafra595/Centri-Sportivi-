@@ -36,8 +36,9 @@
 @media(max-width:700px){.filter-bar{display:grid;grid-template-columns:1fr 1fr}.compact-filter{min-width:0;width:100%}.filter-bar .btn{grid-column:1/-1}.field-grid{grid-template-columns:1fr}.manager-toolbar{align-items:stretch}.manager-toolbar>.row{width:100%}.manager-toolbar .btn{flex:1}.week-calendar{grid-template-columns:repeat(7,150px)}.confirmation-card>div{flex-direction:column;gap:4px}.confirmation-card strong{text-align:left}.quick-dates{display:grid;grid-template-columns:1fr 1fr}.custom-date{grid-column:1/-1}.confirm-actions .btn{flex:1}.admin-stats{grid-template-columns:1fr 1fr}}
 
 /* V3.1 – selezione data, chiusure su intervallo e ricorrenze multi-giorno */
-.date-picker-proxy{position:absolute!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important}
-.custom-date{cursor:pointer}
+.date-picker-proxy{display:none!important}
+.custom-date{position:relative;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;justify-content:center}
+.date-picker-native{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;opacity:0!important;cursor:pointer!important;pointer-events:auto!important;z-index:5!important;-webkit-appearance:none!important;appearance:none!important}
 .schedule-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:10px}
 .schedule-head>div{display:flex;flex-direction:column;gap:4px}
 .recurring-schedules{display:flex;flex-direction:column;gap:10px}
@@ -68,3 +69,27 @@
 .recurring-group-actions{display:flex;justify-content:flex-end;padding-top:12px}
 .btn.tiny{padding:6px 8px;border-radius:8px;font-size:10px}
 @media(max-width:700px){.booking-tabs{overflow:auto}.booking-tab{white-space:nowrap}.manage-row{align-items:flex-start;flex-wrap:wrap}.recurring-group-head{flex-direction:column}.recurring-group-head .btn{width:100%}}
+
+
+/* V3.3 – mobile-first: tap nativi, modali e controlli */
+@media(max-width:700px){
+  html,body{max-width:100%;overflow-x:hidden}
+  .date-chip{min-height:58px;touch-action:manipulation}
+  .custom-date{grid-column:1/-1}
+  .date-picker-native{font-size:16px!important}
+  .modal-backdrop{padding:10px!important;align-items:flex-end!important}
+  .modal{width:100%!important;max-width:100%!important;max-height:92dvh!important;border-radius:24px 24px 0 0!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch}
+  .modal .section-head{position:sticky;top:0;background:#fff;z-index:8;padding-top:2px}
+  .input,select.input,textarea.input,input[type=date],input[type=time]{font-size:16px!important;min-height:48px}
+  .btn{min-height:44px;touch-action:manipulation}
+  .btn.small{min-height:42px}
+  .recurring-schedule-row{grid-template-columns:1fr!important;align-items:stretch}
+  .recurring-schedule-row .schedule-remove{width:100%;height:44px}
+  .schedule-head .btn{width:100%}
+  .week-calendar{scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+  .calendar-day{scroll-snap-align:start}
+  .recurring-dates{max-height:48dvh;-webkit-overflow-scrolling:touch}
+  .booking-management-modal{max-height:92dvh!important}
+  .booking-tabs{position:sticky;top:58px;background:#f3f5f7;z-index:7}
+  .manage-row .btn,.recurring-group-actions .btn{min-height:42px}
+}
