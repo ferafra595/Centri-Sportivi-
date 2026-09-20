@@ -539,6 +539,32 @@ async function handlePost(request, env, url) {
     return ok({ created, conflicts: finalConflicts, recurring_group: group });
   }
 
+
+  if (action === 'manager-booking-bulk-cancel') {
+    const s = await requireRole(request, env, ['manager']);
+    if (!s) return bad('Non autorizzato', 401);
+    let updated = 0;
+    const group = String(data.recurring_group || '').trim();
+    if (group) {
+      const r = await env.DB.prepare(`
+        UPDATE bookings SET status='cancelled'
+        WHERE center_id=? AND recurring_group=? AND status!='cancelled'
+      `).bind(s.center_id, group).run();
+      updated = Number(r.meta?.changes || 0);
+      return ok({ updated });
+    }
+    const ids = Array.isArray(data.ids) ? [...new Set(data.ids.map(Number).filter(Number.isFinite))].slice(0, 250) : [];
+    if (!ids.length) return bad('Nessuna prenotazione selezionata');
+    for (const id of ids) {
+      const r = await env.DB.prepare(`
+        UPDATE bookings SET status='cancelled'
+        WHERE id=? AND center_id=? AND status!='cancelled'
+      `).bind(id, s.center_id).run();
+      updated += Number(r.meta?.changes || 0);
+    }
+    return ok({ updated });
+  }
+
   if (action === 'manager-booking-status') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
