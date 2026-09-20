@@ -134,6 +134,19 @@ async function handleGet(request, env, url) {
     return ok({ centers: results });
   }
 
+  if (action === 'admin-fields') {
+    const s = await requireRole(request, env, ['admin']);
+    if (!s) return bad('Non autorizzato', 401);
+    const centerId = Number(url.searchParams.get('center_id') || 0);
+    if (!centerId) return bad('Centro non valido');
+    const center = await env.DB.prepare(`SELECT id,name FROM centers WHERE id=?`).bind(centerId).first();
+    if (!center) return bad('Centro non trovato', 404);
+    const { results } = await env.DB.prepare(`
+      SELECT * FROM fields WHERE center_id=? ORDER BY active DESC, id ASC
+    `).bind(centerId).all();
+    return ok({ center, fields: results });
+  }
+
   if (action === 'admin-managers') {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
