@@ -231,7 +231,7 @@ async function handlePost(request, env, url) {
     await env.DB.prepare(`
       INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,customer_email,date,start_time,end_time,price_cents,source)
       VALUES(?,?,?,?,?,?,?,?,?,'app')
-    `).bind(field.center_id,fieldId,name,phone,String(data.customer_email||''),date,start,end,field.price_cents).run();
+    `).bind(field.center_id,fieldId,name,phone,String(data.customer_email||''),date,start,end,0).run();
     return ok({ message: 'Prenotazione confermata', end_time: end });
   }
 
@@ -270,12 +270,12 @@ async function handlePost(request, env, url) {
     if (!s) return bad('Non autorizzato', 401);
     const centerId = Number(data.center_id), id = Number(data.id || 0);
     if (!centerId || !data.name || !data.sport) return bad('Dati campo incompleti');
-    const vals = [centerId,data.name,data.sport,data.surface||'',data.indoor?1:0,Number(data.duration_minutes||60),Math.round(Number(data.price||0)*100),data.opening_time||'08:00',data.closing_time||'23:00',data.active===false?0:1];
+    const vals = [centerId,data.name,data.sport,data.surface||'',data.indoor?1:0,Number(data.duration_minutes||60),Math.round(Number(data.price_no_shower||0)*100),Math.round(Number(data.price_shower||0)*100),data.opening_time||'08:00',data.closing_time||'23:00',data.active===false?0:1];
     if (id) {
-      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,indoor=?,duration_minutes=?,price_cents=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
+      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,indoor=?,duration_minutes=?,price_cents=?,shower_price_cents=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
       return ok({ id });
     }
-    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,indoor,duration_minutes,price_cents,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
+    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,indoor,duration_minutes,price_cents,shower_price_cents,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
     return ok({ id:r.meta.last_row_id });
   }
 
@@ -340,7 +340,7 @@ async function handlePost(request, env, url) {
     const end = data.end_time || timeFromMinutes(minutes(data.start_time) + Number(field.duration_minutes));
     if (await hasConflict(env, field.id, data.date, data.start_time, end)) return bad('Conflitto con una prenotazione esistente', 409);
     await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
+      .bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,0,data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
     return ok();
   }
 
@@ -360,7 +360,7 @@ async function handlePost(request, env, url) {
       if (getDayOfWeek(d) !== weekday) continue;
       if (await hasConflict(env, field.id, d, start, end)) { conflicts.push(d); continue; }
       await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,recurring_group,notes) VALUES(?,?,?,?,?,?,?,?,?,'confirmed','recurring',?,?)`)
-        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',group,data.notes||'').run();
+        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,0,data.payment_status||'due',group,data.notes||'').run();
       created.push(d);
     }
     return ok({ created, conflicts, recurring_group: group });
