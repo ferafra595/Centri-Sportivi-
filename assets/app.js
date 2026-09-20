@@ -88,6 +88,82 @@ function monthTitle(ym){const [y,m]=ym.split('-').map(Number);return new Intl.Da
 function shiftMonth(ym,n){const [y,m]=ym.split('-').map(Number),d=new Date(y,m-1+n,1);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 function managerCalendarTitle(){return state.calendarView==='month'?monthTitle(state.calendarMonth):`Settimana ${prettyDate(state.weekStart)} – ${prettyDate(addDays(state.weekStart,6))}`}
 function conventionsManager(){const d=state.manager;return `<section class="card section"><div class="section-head"><div><h2>Convenzioni</h2><div class="muted">Richieste di squadre e gruppi.</div></div></div><div class="stack">${d.conventions.length?d.conventions.map(x=>`<div class="admin-center-row"><div><strong>${esc(x.group_name)}</strong><div class="muted">${esc(x.contact_name)} · ${esc(x.phone)} · ${esc(x.field_name||'Da concordare')}</div><small>${esc(x.preferred_days)} ${esc(x.preferred_times)} · ${esc(x.frequency)} · ${esc(x.period_text)}</small></div><div class="spacer"></div><select class="input compact" data-conv="${x.id}"><option value="new" ${x.status==='new'?'selected':''}>Nuova</option><option value="negotiating" ${x.status==='negotiating'?'selected':''}>In trattativa</option><option value="accepted" ${x.status==='accepted'?'selected':''}>Accettata</option><option value="rejected" ${x.status==='rejected'?'selected':''}>Rifiutata</option></select></div>`).join(''):'<div class="empty">Nessuna richiesta.</div>'}</div></section>`}
+function bookingDetail(id){const b=state.manager.bookings.find(x=>Number(x.id)===id);if(!b)return;const m=modal(`<div class="section-head"><div><h2>${b.status==='blocked'?'Chiusura / blocco':'Prenotazione'}</h2><div class="muted">${prettyDate(b.date)} · ${b.start_time}–${b.end_time}</div></div><button class="btn small" data-close>Chiudi</button></div><div class="confirmation-card"><div><span>Campo</span><strong>${esc(b.field_name)}</strong></div>${b.status!=='blocked'?`<div><span>Cliente</span><strong>${esc(b.customer_name)}</strong></div><div><span>Telefono</span><strong>${esc(b.customer_phone||'—')}</strong></div><div><span>Pagamento</span><strong>${b.payment_status==='paid'?'Pagato':'Da pagare'}</strong></div>`:''}<div><span>Note</span><strong>${esc(b.notes||'—')}</strong></div></div><div class="row confirm-actions">${b.status!=='blocked'?`<button class="btn" id="togglePaid">${b.payment_status==='paid'?'Segna da pagare':'Segna pagato'}</button>`:''}<button class="btn danger" id="cancelBooking">${b.status==='blocked'?'Rimuovi blocco':'Annulla prenotazione'}</button></div>`);$('[data-close]',m).onclick=()=>m.remove();$('#togglePaid',m)?.addEventListener('click',async()=>{await api('manager-booking-status',{method:'POST',body:JSON.stringify({id:b.id,payment_status:b.payment_status==='paid'?'due':'paid'})});m.remove();loadManager()});$('#cancelBooking',m).onclick=async()=>{await api('manager-booking-status',{method:'POST',body:JSON.stringify({id:b.id,status:'cancelled'})});m.remove();loadManager()}}
+async function customerHistory(phone){try{const c=state.manager.customers.find(x=>x.customer_phone===phone),d=await api(`manager-customer-history&phone=${encodeURIComponent(phone)}`);const m=modal(`<div class="section-head"><div><h2>${esc(c?.customer_name||'Cliente')}</h2><div class="muted">${esc(phone)} · ${c?.bookings_count||0} prenotazioni totali</div></div><button class="btn small" data-close>Chiudi</button></div><div class="table-wrap"><table class="table"><thead><tr><th>Data</th><th>Ora</th><th>Campo</th><th>Stato</th></tr></thead><tbody>${d.bookings.map(b=>`<tr><td>${prettyDate(b.date)}</td><td>${b.start_time}–${b.end_time}</td><td>${esc(b.field_name)}</td><td><span class="status ${b.status}">${b.status}</span></td></tr>`).join('')}</tbody></table></div>`);$('[data-close]',m).onclick=()=>m.remove()}catch(e){toast(e.message,'error')}}
+function manageBookingsModal(){
+  const d=state.manager;
+  const normal=d.bookings.filter(b=>b.source!=='recurring'&&b.source!=='block');
+  const recurring=d.bookings.filter(b=>b.source==='recurring'&&b.recurring_group);
+  const blocks=d.bookings.filter(b=>b.source==='block');
+  const groups={};
+  recurring.forEach(b=>{(groups[b.recurring_group]??=[]).push(b)});
+  const groupList=Object.entries(groups).sort((a,b)=>(a[1][0]?.date||'').localeCompare(b[1][0]?.date||''));
+  const active=x=>x.status!=='cancelled';
+  const m=modal(`<div class="section-head"><div><h2>Gestione prenotazioni</h2><div class="muted">Prenotazioni singole, serie ricorrenti e chiusure sono gestite separatamente.</div></div><button class="btn small" data-close>Chiudi</button></div>
+  <div class="booking-tabs">
+    <button class="booking-tab active" data-booking-tab="normal">Singole <span>${normal.filter(active).length}</span></button>
+    <button class="booking-tab" data-booking-tab="recurring">Ricorrenti <span>${groupList.filter(([,x])=>x.some(active)).length}</span></button>
+    <button class="booking-tab" data-booking-tab="blocks">Chiusure <span>${blocks.filter(active).length}</span></button>
+  </div>
+  <div class="booking-tab-panel" data-panel="normal">${renderNormalBookings(normal)}</div>
+  <div class="booking-tab-panel hidden" data-panel="recurring">${renderRecurringGroups(groupList)}</div>
+  <div class="booking-tab-panel hidden" data-panel="blocks">${renderBlockBookings(blocks)}</div>`,'booking-management-modal');
+  $('[data-close]',m).onclick=()=>m.remove();
+  $$('[data-booking-tab]',m).forEach(btn=>btn.onclick=()=>{
+    $$('[data-booking-tab]',m).forEach(x=>x.classList.toggle('active',x===btn));
+    $$('[data-panel]',m).forEach(x=>x.classList.toggle('hidden',x.dataset.panel!==btn.dataset.bookingTab));
+  });
+  $$('[data-open-booking]',m).forEach(b=>b.onclick=()=>bookingDetail(Number(b.dataset.openBooking)));
+  $$('[data-cancel-one]',m).forEach(b=>b.onclick=async()=>{
+    if(!confirm('Annullare questa prenotazione?'))return;
+    await api('manager-booking-bulk-cancel',{method:'POST',body:JSON.stringify({ids:[Number(b.dataset.cancelOne)]})});
+    m.remove();toast('Prenotazione annullata');await loadManager();manageBookingsModal();
+  });
+  $$('[data-cancel-group]',m).forEach(b=>b.onclick=async()=>{
+    const group=b.dataset.cancelGroup;
+    const items=groups[group]||[];
+    const activeCount=items.filter(active).length;
+    if(!activeCount)return;
+    if(!confirm(`Annullare tutte le ${activeCount} prenotazioni ancora attive di questa serie?`))return;
+    const r=await api('manager-booking-bulk-cancel',{method:'POST',body:JSON.stringify({recurring_group:group})});
+    m.remove();toast(`${r.updated} prenotazioni della serie annullate`);await loadManager();manageBookingsModal();
+  });
+  $$('[data-cancel-selected]',m).forEach(b=>b.onclick=async()=>{
+    const card=b.closest('.recurring-group-card');
+    const ids=$$('input[data-recurring-instance]:checked',card).map(x=>Number(x.value));
+    if(!ids.length)return toast('Seleziona almeno una data','error');
+    if(!confirm(`Annullare ${ids.length} prenotazioni selezionate?`))return;
+    const r=await api('manager-booking-bulk-cancel',{method:'POST',body:JSON.stringify({ids})});
+    m.remove();toast(`${r.updated} prenotazioni annullate`);await loadManager();manageBookingsModal();
+  });
+  $$('[data-remove-block]',m).forEach(b=>b.onclick=async()=>{
+    if(!confirm('Rimuovere questa chiusura?'))return;
+    await api('manager-booking-bulk-cancel',{method:'POST',body:JSON.stringify({ids:[Number(b.dataset.removeBlock)]})});
+    m.remove();toast('Chiusura rimossa');await loadManager();manageBookingsModal();
+  });
+}
+function bookingStateLabel(b){return b.status==='cancelled'?'Annullata':b.status==='blocked'?'Attiva':'Confermata'}
+function renderNormalBookings(items){
+  const sorted=[...items].sort((a,b)=>(b.date+b.start_time).localeCompare(a.date+a.start_time));
+  return sorted.length?`<div class="manage-list">${sorted.map(b=>`<div class="manage-row ${b.status==='cancelled'?'is-cancelled':''}"><div><strong>${prettyDate(b.date)} · ${b.start_time}–${b.end_time}</strong><span>${esc(b.field_name)} · ${esc(b.customer_name||'Cliente')}</span></div><div class="spacer"></div><span class="status ${b.status}">${bookingStateLabel(b)}</span><button class="btn small" data-open-booking="${b.id}">Apri</button>${b.status!=='cancelled'?`<button class="btn small danger" data-cancel-one="${b.id}">Annulla</button>`:''}</div>`).join('')}</div>`:'<div class="empty">Nessuna prenotazione singola.</div>';
+}
+function renderRecurringGroups(groupList){
+  if(!groupList.length)return '<div class="empty">Nessuna prenotazione ricorrente.</div>';
+  return `<div class="recurring-groups">${groupList.map(([group,items])=>{
+    const sorted=[...items].sort((a,b)=>(a.date+a.start_time).localeCompare(b.date+b.start_time));
+    const active=sorted.filter(x=>x.status!=='cancelled'),first=sorted[0];
+    const schedules=[...new Set(sorted.map(x=>`${dayNames[new Date(`${x.date}T12:00:00`).getDay()]} ${x.start_time}`))].join(' · ');
+    return `<section class="recurring-group-card"><div class="recurring-group-head"><div><span class="eyebrow">SERIE RICORRENTE</span><h3>${esc(first?.customer_name||'Ricorrente')}</h3><p>${esc(first?.field_name||'')} · ${schedules}</p><small>${active.length} attive su ${sorted.length} registrate · ${prettyDate(sorted[0].date)} → ${prettyDate(sorted[sorted.length-1].date)}</small></div>${active.length?`<button class="btn small danger" data-cancel-group="${esc(group)}">Annulla tutta la serie</button>`:'<span class="status cancelled">Serie annullata</span>'}</div>
+      <div class="recurring-instance-list">${sorted.map(x=>`<label class="recurring-instance ${x.status==='cancelled'?'is-cancelled':''}"><input type="checkbox" data-recurring-instance value="${x.id}" ${x.status==='cancelled'?'disabled':''}><span><strong>${prettyDate(x.date)} · ${x.start_time}–${x.end_time}</strong><small>${x.status==='cancelled'?'Annullata':x.payment_status==='paid'?'Pagato':'Da pagare'}</small></span><button class="btn tiny" type="button" data-open-booking="${x.id}">Apri</button></label>`).join('')}</div>
+      ${active.length?`<div class="recurring-group-actions"><button class="btn danger" data-cancel-selected="${esc(group)}">Annulla date selezionate</button></div>`:''}
+    </section>`;
+  }).join('')}</div>`;
+}
+function renderBlockBookings(items){
+  const sorted=[...items].sort((a,b)=>(b.date+b.start_time).localeCompare(a.date+a.start_time));
+  return sorted.length?`<div class="manage-list">${sorted.map(b=>`<div class="manage-row ${b.status==='cancelled'?'is-cancelled':''}"><div><strong>${prettyDate(b.date)} · ${b.start_time}–${b.end_time}</strong><span>${esc(b.field_name)} · ${esc(b.notes||'Chiusura / manutenzione')}</span></div><div class="spacer"></div><span class="status ${b.status}">${b.status==='cancelled'?'Rimossa':'Attiva'}</span>${b.status!=='cancelled'?`<button class="btn small danger" data-remove-block="${b.id}">Rimuovi</button>`:''}</div>`).join('')}</div>`:'<div class="empty">Nessuna chiusura registrata.</div>';
+}
+
 function renderManager(){const d=state.manager,s=d.stats||{},repeat=d.customers.filter(c=>Number(c.bookings_count)>1).length;const content=`<div class="manager-toolbar"><div class="row"><button class="btn primary" id="manualBooking">+ Prenotazione</button><button class="btn" id="manageBookings">Gestisci prenotazioni</button><button class="btn" id="blockTime">+ Chiusura / blocco</button>${d.center.recurring_enabled?'<button class="btn" id="recurringBooking">+ Ricorrente</button>':''}</div><a class="btn" target="_blank" href="/?center=${encodeURIComponent(d.center.slug)}">Apri app centro</a></div><div class="stats"><div class="card stat"><span class="muted">Oggi</span><strong>${s.today_bookings||0}</strong></div><div class="card stat"><span class="muted">Prenotazioni mese</span><strong>${s.month_bookings||0}</strong></div><div class="card stat"><span class="muted">Ore occupate mese</span><strong>${s.month_hours||0}</strong></div><div class="card stat"><span class="muted">Clienti ricorrenti</span><strong>${repeat}</strong></div></div><section class="card calendar-card"><div class="section-head calendar-head"><div><h2>Calendario</h2><div class="muted calendar-period">${managerCalendarTitle()}</div></div><div class="calendar-controls"><div class="calendar-view-toggle"><button class="calendar-view-btn ${state.calendarView==='week'?'active':''}" data-calendar-view="week">Settimana</button><button class="calendar-view-btn ${state.calendarView==='month'?'active':''}" data-calendar-view="month">Mese</button></div><div class="row calendar-nav"><button class="btn small" id="prevCalendar">←</button><button class="btn small" id="todayCalendar">Oggi</button><button class="btn small" id="nextCalendar">→</button></div></div></div><div id="managerCalendar">${state.calendarView==='month'?monthCalendar():weekCalendar()}</div></section><div class="manager-grid"><section class="card"><div class="section-head"><div><h2>Clienti abituali</h2><div class="muted">Storico basato sul numero di telefono.</div></div></div><div class="customer-list">${d.customers.length?d.customers.slice(0,12).map(c=>`<button class="customer-row" data-customer="${esc(c.customer_phone)}"><div><strong>${esc(c.customer_name)}</strong><span>${esc(c.customer_phone)}</span></div><div><strong>${c.bookings_count}</strong><span>prenotazioni</span></div></button>`).join(''):'<div class="empty">Nessun cliente ancora.</div>'}</div></section><section class="card"><div class="section-head"><div><h2>Andamento</h2><div class="muted">Ultimi 90 giorni.</div></div></div><div class="insight-list"><div><span>Giorno più richiesto</span><strong>${d.top_day?dayNames[Number(d.top_day.dow)]:'—'}</strong></div><div><span>Fascia più richiesta</span><strong>${d.top_hour?`${String(d.top_hour.hour).padStart(2,'0')}:00`:'—'}</strong></div><div><span>Da incassare</span><strong>${s.due_count||0}</strong></div><div><span>Blocchi futuri</span><strong>${s.future_blocks||0}</strong></div></div></section></div>${d.center.conventions_enabled?conventionsManager():''}`;app.innerHTML=layout('manager',d.center.name,content);bindLogout();bindManager()}
 function weekCalendar(){const d=state.manager,days=Array.from({length:7},(_,i)=>addDays(state.weekStart,i));return `<div class="week-calendar">${days.map(day=>{const items=d.bookings.filter(b=>b.date===day&&b.status!=='cancelled');return `<div class="calendar-day"><button class="calendar-day-head calendar-day-button" data-calendar-day="${day}"><strong>${prettyDate(day)}</strong><span>${items.length}</span></button><div class="calendar-events">${items.length?items.map(b=>calendarEvent(b)).join(''):'<div class="calendar-empty">Libero</div>'}</div></div>`}).join('')}</div>`}
 function calendarEvent(b,compact=false){return `<div class="calendar-event ${b.status==='blocked'?'blocked':''} ${compact?'compact':''}" data-booking="${b.id}"><b>${b.start_time}–${b.end_time}</b><strong>${esc(b.field_name)}</strong><span>${b.status==='blocked'?'Chiusura / blocco':esc(b.customer_name)}</span>${!compact&&b.status!=='blocked'?`<small>${b.payment_status==='paid'?'Pagato':'Da pagare'}</small>`:''}</div>`}
