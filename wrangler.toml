@@ -6,3 +6,7 @@ pages_build_output_dir = "."
 binding = "DB"
 database_name = "sport-booking-db"
 database_id = "9b98fb96-a45a-4791-9d18-cd80e882bb66"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "sport-booking-media"
