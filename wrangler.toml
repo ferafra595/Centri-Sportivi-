@@ -1,0 +1,8 @@
+name = "sport-booking-platform"
+compatibility_date = "2026-09-20"
+pages_build_output_dir = "."
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sport-booking-db"
+database_id = "INSERISCI_QUI_DATABASE_ID"
