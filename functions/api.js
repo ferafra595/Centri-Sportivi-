@@ -134,6 +134,19 @@ async function handleGet(request, env, url) {
     return ok({ centers: results });
   }
 
+  if (action === 'admin-managers') {
+    const s = await requireRole(request, env, ['admin']);
+    if (!s) return bad('Non autorizzato', 401);
+    const { results } = await env.DB.prepare(`
+      SELECT u.id, u.center_id, u.name, u.email, u.active, u.created_at, c.name center_name
+      FROM users u
+      LEFT JOIN centers c ON c.id = u.center_id
+      WHERE u.role = 'manager'
+      ORDER BY u.active DESC, u.id DESC
+    `).all();
+    return ok({ managers: results });
+  }
+
   if (action === 'manager-dashboard') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
@@ -256,11 +269,53 @@ async function handlePost(request, env, url) {
   if (action === 'admin-manager-create') {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
-    if (!data.center_id || !data.name || !data.email || !data.password) return bad('Compila tutti i campi');
+    const centerId = Number(data.center_id);
+    const name = String(data.name || '').trim();
+    const email = String(data.email || '').trim().toLowerCase();
+    const password = String(data.password || '');
+    if (!centerId || !name || !email || !password) return bad('Compila tutti i campi');
+    if (password.length < 6) return bad('La password deve avere almeno 6 caratteri');
+    const center = await env.DB.prepare(`SELECT id FROM centers WHERE id=?`).bind(centerId).first();
+    if (!center) return bad('Centro non trovato', 404);
+    const exists = await env.DB.prepare(`SELECT id FROM users WHERE email=?`).bind(email).first();
+    if (exists) return bad('Esiste già un accesso con questa email', 409);
     const salt = randomToken(16);
-    const hash = await sha256(String(data.password) + salt);
-    await env.DB.prepare(`INSERT INTO users(center_id,name,email,password_hash,password_salt,role) VALUES(?,?,?,?,?,'manager')`)
-      .bind(Number(data.center_id),data.name,String(data.email).toLowerCase(),hash,salt).run();
+    const hash = await sha256(password + salt);
+    const r = await env.DB.prepare(`INSERT INTO users(center_id,name,email,password_hash,password_salt,role,active) VALUES(?,?,?,?,?,'manager',1)`)
+      .bind(centerId,name,email,hash,salt).run();
+    return ok({ id: r.meta.last_row_id });
+  }
+
+  if (action === 'admin-manager-update') {
+    const s = await requireRole(request, env, ['admin']);
+    if (!s) return bad('Non autorizzato', 401);
+    const id = Number(data.id);
+    const centerId = Number(data.center_id);
+    const name = String(data.name || '').trim();
+    const email = String(data.email || '').trim().toLowerCase();
+    const active = data.active === false ? 0 : 1;
+    if (!id || !centerId || !name || !email) return bad('Dati gestore incompleti');
+    const duplicate = await env.DB.prepare(`SELECT id FROM users WHERE email=? AND id<>?`).bind(email,id).first();
+    if (duplicate) return bad('Questa email è già utilizzata da un altro accesso', 409);
+    await env.DB.prepare(`UPDATE users SET center_id=?, name=?, email=?, active=? WHERE id=? AND role='manager'`)
+      .bind(centerId,name,email,active,id).run();
+    if (!active) await env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
+    return ok();
+  }
+
+  if (action === 'admin-manager-reset-password') {
+    const s = await requireRole(request, env, ['admin']);
+    if (!s) return bad('Non autorizzato', 401);
+    const id = Number(data.id);
+    const password = String(data.password || '');
+    if (!id || !password) return bad('Password obbligatoria');
+    if (password.length < 6) return bad('La password deve avere almeno 6 caratteri');
+    const user = await env.DB.prepare(`SELECT id FROM users WHERE id=? AND role='manager'`).bind(id).first();
+    if (!user) return bad('Gestore non trovato', 404);
+    const salt = randomToken(16);
+    const hash = await sha256(password + salt);
+    await env.DB.prepare(`UPDATE users SET password_hash=?, password_salt=? WHERE id=?`).bind(hash,salt,id).run();
+    await env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
     return ok();
   }
 
