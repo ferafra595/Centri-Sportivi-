@@ -452,21 +452,32 @@ async function handlePost(request, env, url) {
   if (action === 'manager-block') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
-    const date = String(data.date || '');
-    if (!date) return bad('Data obbligatoria');
+    const dateFrom = String(data.date_from || data.date || '');
+    const dateTo = String(data.date_to || dateFrom);
+    if (!dateFrom || !dateTo) return bad('Periodo obbligatorio');
+    if (dateTo < dateFrom) return bad('La data finale non può essere precedente a quella iniziale');
     const fieldId = Number(data.field_id || 0);
     const { results: fields } = fieldId
       ? await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(fieldId,s.center_id).all()
       : await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? AND active=1`).bind(s.center_id).all();
     if (!fields.length) return bad('Nessun campo disponibile');
+    if (!data.full_day && (!data.start_time || !data.end_time)) return bad('Indica orario di inizio e fine');
     const created = [], conflicts = [];
-    for (const field of fields) {
-      const start = data.full_day ? field.opening_time : String(data.start_time || field.opening_time);
-      const end = data.full_day ? field.closing_time : String(data.end_time || field.closing_time);
-      if (await hasConflict(env, field.id, date, start, end)) { conflicts.push(field.name); continue; }
-      await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,'blocked','block',?)`)
-        .bind(s.center_id,field.id,'Chiusura / manutenzione','',date,start,end,0,'due',data.notes||'').run();
-      created.push(field.name);
+    let guard = 0;
+    for (let date = dateFrom; date <= dateTo; date = addDays(date, 1)) {
+      if (++guard > 366) return bad('Il periodo massimo per una chiusura è di 366 giorni');
+      for (const field of fields) {
+        const start = data.full_day ? field.opening_time : String(data.start_time);
+        const end = data.full_day ? field.closing_time : String(data.end_time);
+        if (minutes(end) <= minutes(start)) return bad('L’orario di fine deve essere successivo a quello di inizio');
+        if (await hasConflict(env, field.id, date, start, end)) {
+          conflicts.push({ date, field_id: field.id, field_name: field.name, start_time: start, end_time: end });
+          continue;
+        }
+        await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,'blocked','block',?)`)
+          .bind(s.center_id,field.id,'Chiusura / manutenzione','',date,start,end,0,'due',data.notes||'').run();
+        created.push({ date, field_id: field.id, field_name: field.name, start_time: start, end_time: end });
+      }
     }
     return ok({ created, conflicts });
   }
@@ -478,25 +489,54 @@ async function handlePost(request, env, url) {
     if (!center?.recurring_enabled) return bad('Prenotazioni ricorrenti disattivate');
     const field = await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(Number(data.field_id),s.center_id).first();
     if (!field) return bad('Campo non valido');
-    const weekday = Number(data.weekday), startDate = data.start_date, endDate = data.end_date, start = data.start_time;
-    const end = data.end_time || timeFromMinutes(minutes(start) + Number(field.duration_minutes));
-    if (!startDate || !endDate || !start) return bad('Compila periodo e orario');
-    const dates = [], conflicts = [];
-    for (let d = startDate; d <= endDate; d = addDays(d, 1)) {
-      if (getDayOfWeek(d) !== weekday) continue;
-      if (await hasConflict(env, field.id, d, start, end)) conflicts.push(d); else dates.push(d);
+    const startDate = String(data.start_date || ''), endDate = String(data.end_date || '');
+    if (!startDate || !endDate) return bad('Compila il periodo');
+    if (endDate < startDate) return bad('La data finale non può essere precedente a quella iniziale');
+
+    let schedules = Array.isArray(data.schedules) ? data.schedules : [];
+    if (!schedules.length && data.start_time !== undefined) schedules = [{ weekday: Number(data.weekday), start_time: data.start_time }];
+    schedules = schedules
+      .map(x => ({ weekday: Number(x.weekday), start_time: String(x.start_time || '') }))
+      .filter(x => x.weekday >= 0 && x.weekday <= 6 && x.start_time);
+    const seen = new Set();
+    schedules = schedules.filter(x => {
+      const k = `${x.weekday}|${x.start_time}`;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    if (!schedules.length) return bad('Aggiungi almeno un giorno con orario');
+
+    const available = [], conflicts = [];
+    let guard = 0;
+    for (let date = startDate; date <= endDate; date = addDays(date, 1)) {
+      if (++guard > 730) return bad('Il periodo massimo per le ricorrenze è di 730 giorni');
+      const dow = getDayOfWeek(date);
+      for (const schedule of schedules) {
+        if (schedule.weekday !== dow) continue;
+        const start = schedule.start_time;
+        const end = timeFromMinutes(minutes(start) + Number(field.duration_minutes || 60));
+        const item = { date, weekday: dow, start_time: start, end_time: end };
+        if (await hasConflict(env, field.id, date, start, end)) conflicts.push(item);
+        else available.push(item);
+      }
     }
-    if (action === 'manager-recurring-preview') return ok({ available: dates, conflicts, start_time: start, end_time: end });
-    const skip = new Set((data.skip_dates || []).map(String));
-    const group = randomToken(8), created = [];
-    for (const d of dates) {
-      if (skip.has(d)) continue;
-      const pricing = effectivePricing(field, d);
+    if (action === 'manager-recurring-preview') return ok({ available, conflicts });
+
+    const skip = new Set((data.skip_slots || []).map(String));
+    const group = randomToken(8), created = [], finalConflicts = [...conflicts];
+    for (const item of available) {
+      const key = `${item.date}|${item.start_time}`;
+      if (skip.has(key)) continue;
+      if (await hasConflict(env, field.id, item.date, item.start_time, item.end_time)) {
+        finalConflicts.push(item);
+        continue;
+      }
+      const pricing = effectivePricing(field, item.date);
       await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,recurring_group,notes) VALUES(?,?,?,?,?,?,?,?,?,'confirmed','recurring',?,?)`)
-        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,pricing.price_cents,data.payment_status||'due',group,data.notes||'').run();
-      created.push(d);
+        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',item.date,item.start_time,item.end_time,pricing.price_cents,data.payment_status||'due',group,data.notes||'').run();
+      created.push(item);
     }
-    return ok({ created, conflicts, recurring_group: group });
+    return ok({ created, conflicts: finalConflicts, recurring_group: group });
   }
 
   if (action === 'manager-booking-status') {
