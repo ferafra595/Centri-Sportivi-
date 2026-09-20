@@ -37,6 +37,22 @@ function addDays(dateStr, days) {
 function getDayOfWeek(dateStr) {
   return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
 }
+function isWeekend(dateStr) {
+  const day = getDayOfWeek(dateStr);
+  return day === 0 || day === 6;
+}
+function effectivePricing(field, dateStr) {
+  const weekend = isWeekend(dateStr);
+  const standard = Number(field.price_cents || 0);
+  const shower = Number(field.shower_price_cents || 0);
+  const weekendStandard = Number(field.weekend_price_cents || 0);
+  const weekendShower = Number(field.weekend_shower_price_cents || 0);
+  return {
+    price_cents: weekend && weekendStandard > 0 ? weekendStandard : standard,
+    shower_price_cents: weekend && weekendShower > 0 ? weekendShower : shower,
+    weekend
+  };
+}
 async function body(request) {
   try { return await request.json(); } catch { return {}; }
 }
@@ -68,6 +84,12 @@ async function hasConflict(env, fieldId, date, startTime, endTime, ignoreId = 0)
     LIMIT 1
   `).bind(fieldId, date, ignoreId, endTime, startTime).first();
   return !!row;
+}
+function sqlDateRange(daysBack = 0, daysForward = 0) {
+  return {
+    from: daysBack ? `date('now','-${Number(daysBack)} day')` : `date('now')`,
+    to: daysForward ? `date('now','+${Number(daysForward)} day')` : `date('now')`
+  };
 }
 
 async function handleGet(request, env, url) {
@@ -109,7 +131,19 @@ async function handleGet(request, env, url) {
       const occupied = busy.some(b => start < b.end_time && end > b.start_time);
       slots.push({ start, end, available: !occupied });
     }
-    return ok({ field, date, slots });
+    return ok({ field: { ...field, ...effectivePricing(field, date) }, date, slots });
+  }
+
+  if (action === 'media') {
+    const key = url.searchParams.get('key') || '';
+    if (!key || !env.MEDIA) return bad('Media non disponibile', 404);
+    const object = await env.MEDIA.get(key);
+    if (!object) return bad('File non trovato', 404);
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('etag', object.httpEtag);
+    headers.set('cache-control', 'public, max-age=31536000, immutable');
+    return new Response(object.body, { headers });
   }
 
   if (action === 'me') {
@@ -128,10 +162,20 @@ async function handleGet(request, env, url) {
     const { results } = await env.DB.prepare(`
       SELECT c.*,
         (SELECT COUNT(*) FROM fields f WHERE f.center_id=c.id) fields_count,
-        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') bookings_count
+        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') bookings_count,
+        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed' AND strftime('%Y-%m', b.date)=strftime('%Y-%m','now')) month_bookings
       FROM centers c ORDER BY c.id DESC
     `).all();
-    return ok({ centers: results });
+    const stats = await env.DB.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM centers) centers_total,
+        (SELECT COUNT(*) FROM centers WHERE active=1) centers_active,
+        (SELECT COUNT(*) FROM fields WHERE active=1) fields_active,
+        (SELECT COUNT(*) FROM users WHERE role='manager' AND active=1) managers_active,
+        (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now')) month_bookings,
+        (SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND date BETWEEN date('now','-6 day') AND date('now')) week_bookings
+    `).first();
+    return ok({ centers: results, stats });
   }
 
   if (action === 'admin-fields') {
@@ -141,9 +185,7 @@ async function handleGet(request, env, url) {
     if (!centerId) return bad('Centro non valido');
     const center = await env.DB.prepare(`SELECT id,name FROM centers WHERE id=?`).bind(centerId).first();
     if (!center) return bad('Centro non trovato', 404);
-    const { results } = await env.DB.prepare(`
-      SELECT * FROM fields WHERE center_id=? ORDER BY active DESC, id ASC
-    `).bind(centerId).all();
+    const { results } = await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? ORDER BY active DESC, id ASC`).bind(centerId).all();
     return ok({ center, fields: results });
   }
 
@@ -152,8 +194,7 @@ async function handleGet(request, env, url) {
     if (!s) return bad('Non autorizzato', 401);
     const { results } = await env.DB.prepare(`
       SELECT u.id, u.center_id, u.name, u.email, u.active, u.created_at, c.name center_name
-      FROM users u
-      LEFT JOIN centers c ON c.id = u.center_id
+      FROM users u LEFT JOIN centers c ON c.id = u.center_id
       WHERE u.role = 'manager'
       ORDER BY u.active DESC, u.id DESC
     `).all();
@@ -168,28 +209,85 @@ async function handleGet(request, env, url) {
     const { results: fields } = await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? ORDER BY id`).bind(centerId).all();
     const { results: bookings } = await env.DB.prepare(`
       SELECT b.*, f.name field_name, f.sport FROM bookings b JOIN fields f ON f.id=b.field_id
-      WHERE b.center_id=? AND b.date >= date('now','-1 day')
-      ORDER BY b.date, b.start_time LIMIT 250
+      WHERE b.center_id=? AND b.date BETWEEN date('now','-120 day') AND date('now','+180 day')
+      ORDER BY b.date, b.start_time LIMIT 1200
     `).bind(centerId).all();
     const { results: conventions } = await env.DB.prepare(`
       SELECT cr.*, f.name field_name FROM convention_requests cr LEFT JOIN fields f ON f.id=cr.field_id
-      WHERE cr.center_id=? ORDER BY cr.id DESC LIMIT 100
+      WHERE cr.center_id=? ORDER BY cr.id DESC LIMIT 150
     `).bind(centerId).all();
-    return ok({ center, fields, bookings, conventions });
+    const { results: customers } = await env.DB.prepare(`
+      SELECT customer_name, customer_phone,
+             COUNT(*) bookings_count,
+             MAX(date) last_booking,
+             SUM(CASE WHEN date>=date('now','-30 day') THEN 1 ELSE 0 END) last30_count
+      FROM bookings
+      WHERE center_id=? AND status='confirmed' AND source!='block' AND customer_phone!=''
+      GROUP BY customer_phone
+      ORDER BY bookings_count DESC, last_booking DESC
+      LIMIT 100
+    `).bind(centerId).all();
+    const stats = await env.DB.prepare(`
+      SELECT
+        SUM(CASE WHEN status='confirmed' AND date=date('now') THEN 1 ELSE 0 END) today_bookings,
+        SUM(CASE WHEN status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN 1 ELSE 0 END) month_bookings,
+        ROUND(SUM(CASE WHEN status='confirmed' AND strftime('%Y-%m',date)=strftime('%Y-%m','now') THEN (strftime('%s','2000-01-01 '||end_time)-strftime('%s','2000-01-01 '||start_time))/3600.0 ELSE 0 END),1) month_hours,
+        SUM(CASE WHEN status='confirmed' AND payment_status='due' AND date>=date('now') THEN 1 ELSE 0 END) due_count,
+        SUM(CASE WHEN status='blocked' AND date>=date('now') THEN 1 ELSE 0 END) future_blocks
+      FROM bookings WHERE center_id=?
+    `).bind(centerId).first();
+    const topDay = await env.DB.prepare(`
+      SELECT strftime('%w',date) dow, COUNT(*) n FROM bookings
+      WHERE center_id=? AND status='confirmed' AND date>=date('now','-90 day')
+      GROUP BY dow ORDER BY n DESC LIMIT 1
+    `).bind(centerId).first();
+    const topHour = await env.DB.prepare(`
+      SELECT substr(start_time,1,2) hour, COUNT(*) n FROM bookings
+      WHERE center_id=? AND status='confirmed' AND date>=date('now','-90 day')
+      GROUP BY hour ORDER BY n DESC LIMIT 1
+    `).bind(centerId).first();
+    return ok({ center, fields, bookings, conventions, customers, stats, top_day: topDay, top_hour: topHour });
+  }
+
+  if (action === 'manager-customer-history') {
+    const s = await requireRole(request, env, ['manager']);
+    if (!s) return bad('Non autorizzato', 401);
+    const phone = String(url.searchParams.get('phone') || '').trim();
+    if (!phone) return bad('Telefono obbligatorio');
+    const { results } = await env.DB.prepare(`
+      SELECT b.*, f.name field_name FROM bookings b JOIN fields f ON f.id=b.field_id
+      WHERE b.center_id=? AND b.customer_phone=? ORDER BY b.date DESC, b.start_time DESC LIMIT 100
+    `).bind(s.center_id, phone).all();
+    return ok({ bookings: results });
   }
 
   return bad('Azione non valida', 404);
 }
 
+async function handleUpload(request, env) {
+  const s = await requireRole(request, env, ['admin']);
+  if (!s) return bad('Non autorizzato', 401);
+  if (!env.MEDIA) return bad('Binding R2 MEDIA non configurato', 500);
+  const form = await request.formData();
+  const file = form.get('file');
+  if (!(file instanceof File) || !file.size) return bad('File non valido');
+  if (!String(file.type || '').startsWith('image/')) return bad('Carica un’immagine');
+  if (file.size > 8 * 1024 * 1024) return bad('Immagine troppo grande: massimo 8 MB');
+  const ext = (file.name.split('.').pop() || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const key = `centers/${Date.now()}-${randomToken(6)}.${ext}`;
+  await env.MEDIA.put(key, file.stream(), { httpMetadata: { contentType: file.type || 'image/jpeg' } });
+  return ok({ key, url: `/api?action=media&key=${encodeURIComponent(key)}` });
+}
+
 async function handlePost(request, env, url) {
   const action = url.searchParams.get('action') || '';
+  if (action === 'upload-media') return handleUpload(request, env);
   const data = await body(request);
 
   if (action === 'login') {
     const email = String(data.email || '').trim().toLowerCase();
     const password = String(data.password || '');
     if (!email || !password) return bad('Inserisci email e password');
-
     let role, userId = null, centerId = null;
     if (email === String(env.ADMIN_EMAIL || 'admin@local').toLowerCase() && password === String(env.ADMIN_PASSWORD || '')) {
       role = 'admin';
@@ -200,7 +298,6 @@ async function handlePost(request, env, url) {
       if (digest !== user.password_hash) return bad('Credenziali non valide', 401);
       role = 'manager'; userId = user.id; centerId = user.center_id;
     }
-
     const token = randomToken();
     const expires = new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString();
     await env.DB.prepare(`INSERT INTO sessions(token,user_id,role,center_id,expires_at) VALUES(?,?,?,?,?)`).bind(token,userId,role,centerId,expires).run();
@@ -228,11 +325,18 @@ async function handlePost(request, env, url) {
     if (!field) return bad('Campo non disponibile', 404);
     const end = timeFromMinutes(minutes(start) + Number(field.duration_minutes));
     if (await hasConflict(env, fieldId, date, start, end)) return bad('Questo orario non è più disponibile', 409);
-    await env.DB.prepare(`
+    const pricing = effectivePricing(field, date);
+    const r = await env.DB.prepare(`
       INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,customer_email,date,start_time,end_time,price_cents,source)
       VALUES(?,?,?,?,?,?,?,?,?,'app')
-    `).bind(field.center_id,fieldId,name,phone,String(data.customer_email||''),date,start,end,0).run();
-    return ok({ message: 'Prenotazione confermata', end_time: end });
+    `).bind(field.center_id,fieldId,name,phone,String(data.customer_email||''),date,start,end,pricing.price_cents).run();
+    return ok({
+      message: 'Prenotazione confermata',
+      booking_id: r.meta.last_row_id,
+      end_time: end,
+      price_cents: pricing.price_cents,
+      shower_price_cents: pricing.shower_price_cents
+    });
   }
 
   if (action === 'convention') {
@@ -270,12 +374,17 @@ async function handlePost(request, env, url) {
     if (!s) return bad('Non autorizzato', 401);
     const centerId = Number(data.center_id), id = Number(data.id || 0);
     if (!centerId || !data.name || !data.sport) return bad('Dati campo incompleti');
-    const vals = [centerId,data.name,data.sport,data.surface||'',data.indoor?1:0,Number(data.duration_minutes||60),Math.round(Number(data.price_no_shower||0)*100),Math.round(Number(data.price_shower||0)*100),data.opening_time||'08:00',data.closing_time||'23:00',data.active===false?0:1];
+    const vals = [
+      centerId, data.name, data.sport, data.surface||'', data.indoor?1:0, Number(data.duration_minutes||60),
+      Math.round(Number(data.price_no_shower||0)*100), Math.round(Number(data.price_shower||0)*100),
+      Math.round(Number(data.weekend_price_no_shower||0)*100), Math.round(Number(data.weekend_price_shower||0)*100),
+      String(data.pricing_note||''), data.opening_time||'08:00', data.closing_time||'23:00', data.active===false?0:1
+    ];
     if (id) {
-      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,indoor=?,duration_minutes=?,price_cents=?,shower_price_cents=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
+      await env.DB.prepare(`UPDATE fields SET center_id=?,name=?,sport=?,surface=?,indoor=?,duration_minutes=?,price_cents=?,shower_price_cents=?,weekend_price_cents=?,weekend_shower_price_cents=?,pricing_note=?,opening_time=?,closing_time=?,active=? WHERE id=?`).bind(...vals,id).run();
       return ok({ id });
     }
-    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,indoor,duration_minutes,price_cents,shower_price_cents,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
+    const r = await env.DB.prepare(`INSERT INTO fields(center_id,name,sport,surface,indoor,duration_minutes,price_cents,shower_price_cents,weekend_price_cents,weekend_shower_price_cents,pricing_note,opening_time,closing_time,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...vals).run();
     return ok({ id:r.meta.last_row_id });
   }
 
@@ -302,16 +411,13 @@ async function handlePost(request, env, url) {
   if (action === 'admin-manager-update') {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
-    const id = Number(data.id);
-    const centerId = Number(data.center_id);
-    const name = String(data.name || '').trim();
-    const email = String(data.email || '').trim().toLowerCase();
+    const id = Number(data.id), centerId = Number(data.center_id);
+    const name = String(data.name || '').trim(), email = String(data.email || '').trim().toLowerCase();
     const active = data.active === false ? 0 : 1;
     if (!id || !centerId || !name || !email) return bad('Dati gestore incompleti');
     const duplicate = await env.DB.prepare(`SELECT id FROM users WHERE email=? AND id<>?`).bind(email,id).first();
     if (duplicate) return bad('Questa email è già utilizzata da un altro accesso', 409);
-    await env.DB.prepare(`UPDATE users SET center_id=?, name=?, email=?, active=? WHERE id=? AND role='manager'`)
-      .bind(centerId,name,email,active,id).run();
+    await env.DB.prepare(`UPDATE users SET center_id=?, name=?, email=?, active=? WHERE id=? AND role='manager'`).bind(centerId,name,email,active,id).run();
     if (!active) await env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
     return ok();
   }
@@ -319,14 +425,12 @@ async function handlePost(request, env, url) {
   if (action === 'admin-manager-reset-password') {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
-    const id = Number(data.id);
-    const password = String(data.password || '');
+    const id = Number(data.id), password = String(data.password || '');
     if (!id || !password) return bad('Password obbligatoria');
     if (password.length < 6) return bad('La password deve avere almeno 6 caratteri');
     const user = await env.DB.prepare(`SELECT id FROM users WHERE id=? AND role='manager'`).bind(id).first();
     if (!user) return bad('Gestore non trovato', 404);
-    const salt = randomToken(16);
-    const hash = await sha256(password + salt);
+    const salt = randomToken(16), hash = await sha256(password + salt);
     await env.DB.prepare(`UPDATE users SET password_hash=?, password_salt=? WHERE id=?`).bind(hash,salt,id).run();
     await env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
     return ok();
@@ -339,28 +443,57 @@ async function handlePost(request, env, url) {
     if (!field) return bad('Campo non valido');
     const end = data.end_time || timeFromMinutes(minutes(data.start_time) + Number(field.duration_minutes));
     if (await hasConflict(env, field.id, data.date, data.start_time, end)) return bad('Conflitto con una prenotazione esistente', 409);
+    const pricing = effectivePricing(field, data.date);
     await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,0,data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
+      .bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,pricing.price_cents,data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
     return ok();
   }
 
-  if (action === 'manager-recurring') {
+  if (action === 'manager-block') {
+    const s = await requireRole(request, env, ['manager']);
+    if (!s) return bad('Non autorizzato', 401);
+    const date = String(data.date || '');
+    if (!date) return bad('Data obbligatoria');
+    const fieldId = Number(data.field_id || 0);
+    const { results: fields } = fieldId
+      ? await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(fieldId,s.center_id).all()
+      : await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? AND active=1`).bind(s.center_id).all();
+    if (!fields.length) return bad('Nessun campo disponibile');
+    const created = [], conflicts = [];
+    for (const field of fields) {
+      const start = data.full_day ? field.opening_time : String(data.start_time || field.opening_time);
+      const end = data.full_day ? field.closing_time : String(data.end_time || field.closing_time);
+      if (await hasConflict(env, field.id, date, start, end)) { conflicts.push(field.name); continue; }
+      await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,'blocked','block',?)`)
+        .bind(s.center_id,field.id,'Chiusura / manutenzione','',date,start,end,0,'due',data.notes||'').run();
+      created.push(field.name);
+    }
+    return ok({ created, conflicts });
+  }
+
+  if (action === 'manager-recurring-preview' || action === 'manager-recurring') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
     const center = await env.DB.prepare(`SELECT recurring_enabled FROM centers WHERE id=?`).bind(s.center_id).first();
     if (!center?.recurring_enabled) return bad('Prenotazioni ricorrenti disattivate');
     const field = await env.DB.prepare(`SELECT * FROM fields WHERE id=? AND center_id=?`).bind(Number(data.field_id),s.center_id).first();
     if (!field) return bad('Campo non valido');
-    const weekday = Number(data.weekday);
-    const startDate = data.start_date, endDate = data.end_date, start = data.start_time;
+    const weekday = Number(data.weekday), startDate = data.start_date, endDate = data.end_date, start = data.start_time;
     const end = data.end_time || timeFromMinutes(minutes(start) + Number(field.duration_minutes));
-    const group = randomToken(8);
-    const conflicts = [], created = [];
+    if (!startDate || !endDate || !start) return bad('Compila periodo e orario');
+    const dates = [], conflicts = [];
     for (let d = startDate; d <= endDate; d = addDays(d, 1)) {
       if (getDayOfWeek(d) !== weekday) continue;
-      if (await hasConflict(env, field.id, d, start, end)) { conflicts.push(d); continue; }
+      if (await hasConflict(env, field.id, d, start, end)) conflicts.push(d); else dates.push(d);
+    }
+    if (action === 'manager-recurring-preview') return ok({ available: dates, conflicts, start_time: start, end_time: end });
+    const skip = new Set((data.skip_dates || []).map(String));
+    const group = randomToken(8), created = [];
+    for (const d of dates) {
+      if (skip.has(d)) continue;
+      const pricing = effectivePricing(field, d);
       await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,recurring_group,notes) VALUES(?,?,?,?,?,?,?,?,?,'confirmed','recurring',?,?)`)
-        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,0,data.payment_status||'due',group,data.notes||'').run();
+        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,pricing.price_cents,data.payment_status||'due',group,data.notes||'').run();
       created.push(d);
     }
     return ok({ created, conflicts, recurring_group: group });
