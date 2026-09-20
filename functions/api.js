@@ -2,9 +2,8 @@ const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(d
   status,
   headers: { 'content-type': 'application/json; charset=utf-8', ...headers }
 });
-
-const bad = (message, status = 400) => json({ ok: false, error: message }, status);
 const ok = (data = {}, status = 200, headers = {}) => json({ ok: true, ...data }, status, headers);
+const bad = (message, status = 400) => json({ ok: false, error: message }, status);
 
 function parseCookies(request) {
   const raw = request.headers.get('cookie') || '';
@@ -13,21 +12,18 @@ function parseCookies(request) {
     return [x.slice(0, i), decodeURIComponent(x.slice(i + 1))];
   }));
 }
-
 function randomToken(bytes = 32) {
   const arr = new Uint8Array(bytes);
   crypto.getRandomValues(arr);
   return [...arr].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-
 async function sha256(value) {
   const data = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest('SHA-256', data);
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-
 function minutes(t) {
-  const [h, m] = t.split(':').map(Number);
+  const [h, m] = String(t || '00:00').split(':').map(Number);
   return h * 60 + m;
 }
 function timeFromMinutes(v) {
@@ -41,51 +37,57 @@ function addDays(dateStr, days) {
 function getDayOfWeek(dateStr) {
   return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
 }
-
+async function body(request) {
+  try { return await request.json(); } catch { return {}; }
+}
 async function getSession(request, env) {
   const token = parseCookies(request).sport_session;
   if (!token) return null;
-  const row = await env.DB.prepare(`
+  return await env.DB.prepare(`
     SELECT s.*, u.name user_name, u.email user_email
     FROM sessions s LEFT JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND datetime(s.expires_at) > datetime('now')
   `).bind(token).first();
-  return row || null;
 }
-
 async function requireRole(request, env, roles) {
   const session = await getSession(request, env);
   if (!session || !roles.includes(session.role)) return null;
   return session;
 }
-
-async function body(request) {
-  try { return await request.json(); } catch { return {}; }
-}
-
 async function publicCenter(env, slug) {
   const center = await env.DB.prepare(`SELECT * FROM centers WHERE slug = ? AND active = 1`).bind(slug).first();
   if (!center) return null;
   const { results: fields } = await env.DB.prepare(`SELECT * FROM fields WHERE center_id = ? AND active = 1 ORDER BY id`).bind(center.id).all();
   return { center, fields };
 }
-
 async function hasConflict(env, fieldId, date, startTime, endTime, ignoreId = 0) {
   const row = await env.DB.prepare(`
     SELECT id FROM bookings
     WHERE field_id = ? AND date = ? AND status IN ('confirmed','blocked')
-      AND id != ?
-      AND start_time < ? AND end_time > ?
+      AND id != ? AND start_time < ? AND end_time > ?
     LIMIT 1
   `).bind(fieldId, date, ignoreId, endTime, startTime).first();
   return !!row;
 }
 
 async function handleGet(request, env, url) {
-  const action = url.searchParams.get('action') || 'center';
+  const action = url.searchParams.get('action') || 'public-centers';
+
+  if (action === 'public-centers') {
+    const { results } = await env.DB.prepare(`
+      SELECT c.*,
+        (SELECT COUNT(*) FROM fields f WHERE f.center_id = c.id AND f.active = 1) fields_count,
+        (SELECT GROUP_CONCAT(DISTINCT f.sport) FROM fields f WHERE f.center_id = c.id AND f.active = 1) sports
+      FROM centers c
+      WHERE c.active = 1
+      ORDER BY c.name COLLATE NOCASE
+    `).all();
+    return ok({ centers: results });
+  }
 
   if (action === 'center') {
-    const slug = url.searchParams.get('slug') || 'demo-sport';
+    const slug = url.searchParams.get('slug');
+    if (!slug) return bad('Centro non specificato');
     const data = await publicCenter(env, slug);
     return data ? ok(data) : bad('Centro non trovato', 404);
   }
@@ -101,7 +103,7 @@ async function handleGet(request, env, url) {
       WHERE field_id = ? AND date = ? AND status IN ('confirmed','blocked')
     `).bind(fieldId, date).all();
     const slots = [];
-    const step = field.duration_minutes;
+    const step = Number(field.duration_minutes || 60);
     for (let m = minutes(field.opening_time); m + step <= minutes(field.closing_time); m += step) {
       const start = timeFromMinutes(m), end = timeFromMinutes(m + step);
       const occupied = busy.some(b => start < b.end_time && end > b.start_time);
@@ -112,15 +114,21 @@ async function handleGet(request, env, url) {
 
   if (action === 'me') {
     const session = await getSession(request, env);
-    return ok({ session: session ? { role: session.role, center_id: session.center_id, name: session.user_name || 'Admin', email: session.user_email || '' } : null });
+    return ok({ session: session ? {
+      role: session.role,
+      center_id: session.center_id,
+      name: session.user_name || 'Admin',
+      email: session.user_email || ''
+    } : null });
   }
 
   if (action === 'admin-centers') {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
     const { results } = await env.DB.prepare(`
-      SELECT c.*, (SELECT COUNT(*) FROM fields f WHERE f.center_id=c.id) fields_count,
-             (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') bookings_count
+      SELECT c.*,
+        (SELECT COUNT(*) FROM fields f WHERE f.center_id=c.id) fields_count,
+        (SELECT COUNT(*) FROM bookings b WHERE b.center_id=c.id AND b.status='confirmed') bookings_count
       FROM centers c ORDER BY c.id DESC
     `).all();
     return ok({ centers: results });
@@ -170,13 +178,17 @@ async function handlePost(request, env, url) {
     const token = randomToken();
     const expires = new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString();
     await env.DB.prepare(`INSERT INTO sessions(token,user_id,role,center_id,expires_at) VALUES(?,?,?,?,?)`).bind(token,userId,role,centerId,expires).run();
-    return ok({ role, center_id: centerId }, 200, { 'set-cookie': `sport_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1209600` });
+    return ok({ role, center_id: centerId }, 200, {
+      'set-cookie': `sport_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1209600`
+    });
   }
 
   if (action === 'logout') {
     const token = parseCookies(request).sport_session;
     if (token) await env.DB.prepare(`DELETE FROM sessions WHERE token=?`).bind(token).run();
-    return json({ ok: true }, 200, { 'set-cookie': 'sport_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' });
+    return json({ ok: true }, 200, {
+      'set-cookie': 'sport_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+    });
   }
 
   if (action === 'booking') {
@@ -213,8 +225,12 @@ async function handlePost(request, env, url) {
     const s = await requireRole(request, env, ['admin']);
     if (!s) return bad('Non autorizzato', 401);
     const id = Number(data.id || 0);
-    const values = [data.slug, data.name, data.logo_url||'', data.cover_url||'', data.accent_color||'#111827', data.phone||'', data.whatsapp||'', data.email||'', data.address||'', data.description||'', data.conventions_enabled ? 1 : 0, data.recurring_enabled ? 1 : 0, data.active === false ? 0 : 1];
     if (!data.slug || !data.name) return bad('Nome e slug sono obbligatori');
+    const values = [
+      data.slug, data.name, data.logo_url||'', data.cover_url||'', data.accent_color||'#111827',
+      data.phone||'', data.whatsapp||'', data.email||'', data.address||'', data.description||'',
+      data.conventions_enabled ? 1 : 0, data.recurring_enabled ? 1 : 0, data.active === false ? 0 : 1
+    ];
     if (id) {
       await env.DB.prepare(`UPDATE centers SET slug=?,name=?,logo_url=?,cover_url=?,accent_color=?,phone=?,whatsapp=?,email=?,address=?,description=?,conventions_enabled=?,recurring_enabled=?,active=? WHERE id=?`).bind(...values,id).run();
       return ok({ id });
@@ -243,7 +259,8 @@ async function handlePost(request, env, url) {
     if (!data.center_id || !data.name || !data.email || !data.password) return bad('Compila tutti i campi');
     const salt = randomToken(16);
     const hash = await sha256(String(data.password) + salt);
-    await env.DB.prepare(`INSERT INTO users(center_id,name,email,password_hash,password_salt,role) VALUES(?,?,?,?,?,'manager')`).bind(Number(data.center_id),data.name,String(data.email).toLowerCase(),hash,salt).run();
+    await env.DB.prepare(`INSERT INTO users(center_id,name,email,password_hash,password_salt,role) VALUES(?,?,?,?,?,'manager')`)
+      .bind(Number(data.center_id),data.name,String(data.email).toLowerCase(),hash,salt).run();
     return ok();
   }
 
@@ -254,7 +271,8 @@ async function handlePost(request, env, url) {
     if (!field) return bad('Campo non valido');
     const end = data.end_time || timeFromMinutes(minutes(data.start_time) + Number(field.duration_minutes));
     if (await hasConflict(env, field.id, data.date, data.start_time, end)) return bad('Conflitto con una prenotazione esistente', 409);
-    await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
+    await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(s.center_id,field.id,data.customer_name||'Prenotazione manuale',data.customer_phone||'',data.date,data.start_time,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',data.blocked?'blocked':'confirmed',data.blocked?'block':'manager',data.notes||'').run();
     return ok();
   }
 
@@ -273,7 +291,8 @@ async function handlePost(request, env, url) {
     for (let d = startDate; d <= endDate; d = addDays(d, 1)) {
       if (getDayOfWeek(d) !== weekday) continue;
       if (await hasConflict(env, field.id, d, start, end)) { conflicts.push(d); continue; }
-      await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,recurring_group,notes) VALUES(?,?,?,?,?,?,?,?,?,'confirmed','recurring',?,?)`).bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',group,data.notes||'').run();
+      await env.DB.prepare(`INSERT INTO bookings(center_id,field_id,customer_name,customer_phone,date,start_time,end_time,price_cents,payment_status,status,source,recurring_group,notes) VALUES(?,?,?,?,?,?,?,?,?,'confirmed','recurring',?,?)`)
+        .bind(s.center_id,field.id,data.customer_name||data.group_name||'Convenzione',data.customer_phone||'',d,start,end,Math.round(Number(data.price ?? field.price_cents/100)*100),data.payment_status||'due',group,data.notes||'').run();
       created.push(d);
     }
     return ok({ created, conflicts, recurring_group: group });
