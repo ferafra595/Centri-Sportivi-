@@ -105,6 +105,10 @@ async function handleGet(request, env, url) {
         (SELECT COUNT(*) FROM fields f WHERE f.center_id = c.id AND f.active = 1 AND f.indoor=0) outdoor_count
       FROM centers c
       WHERE c.active = 1
+        AND EXISTS (
+          SELECT 1 FROM fields f
+          WHERE f.center_id = c.id AND f.active = 1
+        )
       ORDER BY c.name COLLATE NOCASE
     `).all();
     return ok({ centers: results });
