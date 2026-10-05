@@ -236,9 +236,24 @@ async function handleGet(request, env, url) {
     return ok({bookings:results});
   }
 
+  if (action === 'admin-bookings') {
+    const s = await requireRole(request, env, ['admin']);
+    if (!s) return bad('Non autorizzato', 401);
+    const { results } = await env.DB.prepare(`
+      SELECT b.*, c.name center_name, f.name field_name
+      FROM bookings b
+      JOIN centers c ON c.id=b.center_id
+      JOIN fields f ON f.id=b.field_id
+      ORDER BY b.date DESC, b.start_time DESC
+      LIMIT 1000
+    `).all();
+    return ok({ bookings: results });
+  }
+
   if (action === 'manager-dashboard') {
     const s = await requireRole(request, env, ['manager']);
     if (!s) return bad('Non autorizzato', 401);
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS customer_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, center_id INTEGER NOT NULL, phone TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(center_id, phone))`).run();
     const centerId = s.center_id;
     const center = await env.DB.prepare(`SELECT * FROM centers WHERE id=?`).bind(centerId).first();
     const { results: fields } = await env.DB.prepare(`SELECT * FROM fields WHERE center_id=? ORDER BY id`).bind(centerId).all();
@@ -485,6 +500,27 @@ async function handlePost(request, env, url) {
     await env.DB.prepare(`UPDATE users SET password_hash=?, password_salt=? WHERE id=?`).bind(hash,salt,id).run();
     await env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
     return ok();
+  }
+
+  if (action === 'public-booking-cancel') {
+    const id=Number(data.id||0), centerId=Number(data.center_id||0), phone=String(data.phone||'').trim();
+    if(!id||!centerId||!phone) return bad('Dati prenotazione non validi');
+    const booking=await env.DB.prepare(`SELECT * FROM bookings WHERE id=? AND center_id=? AND customer_phone=? AND source!='block'`).bind(id,centerId,phone).first();
+    if(!booking) return bad('Prenotazione non trovata',404);
+    if(booking.status==='cancelled') return ok({cancelled:true});
+    if(booking.date < new Date().toISOString().slice(0,10)) return bad('Non puoi eliminare una prenotazione già passata');
+    await env.DB.prepare(`UPDATE bookings SET status='cancelled' WHERE id=?`).bind(id).run();
+    return ok({cancelled:true});
+  }
+
+  if (action === 'admin-booking-cancel') {
+    const s=await requireRole(request,env,['admin']); if(!s)return bad('Non autorizzato',401);
+    const id=Number(data.id||0); if(!id)return bad('Prenotazione non valida');
+    const booking=await env.DB.prepare(`SELECT id,source,status FROM bookings WHERE id=?`).bind(id).first();
+    if(!booking)return bad('Prenotazione non trovata',404);
+    if(booking.source==='block')return bad('Le chiusure si gestiscono dal pannello del centro');
+    await env.DB.prepare(`UPDATE bookings SET status='cancelled' WHERE id=?`).bind(id).run();
+    return ok({cancelled:true});
   }
 
   if (action === 'manager-customer-note') {
